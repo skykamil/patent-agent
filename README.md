@@ -1,0 +1,170 @@
+# Patent Research Agent
+
+A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite logging of every tool call, and an eval harness that checks which tools the model chooses for a given natural-language question.
+
+## Status
+
+**Work in progress.** This is an in-development learning project, not a finished tool. There is no interactive mode: running the script executes a fixed eval set. The sections below separate what is implemented from what is not.
+
+Implemented:
+
+- OAuth2 client-credentials flow against EPO OPS, with the token cached in memory and refreshed 30 seconds before expiry
+- `search_patent` — CQL query built dynamically from any combination of title, applicant, publication number, application number, and a publication date range
+- `get_patent_details` — bibliographic data for one publication, parsed from OPS XML
+- `expiration_date` — local calculation, no API call
+- Agent loop that chains tools across turns (e.g. `get_patent_details` → `expiration_date`) without the order being prompted
+- Per-tool `try`/`except`: a failing tool returns an error object to the model as a normal `function_call_output` instead of crashing the run
+- SQLite logging of every tool call, grouped by `run_id`
+- Eval harness: 10 cases, including one negative case where no tool should be called
+
+Not implemented (see [Planned](#planned)):
+
+- Interactive CLI or REPL
+- Exception-type discrimination — `except Exception` currently treats every failure identically
+- Open-ended date ranges via CQL relational operators (handled in Python instead, see [Limitations](#limitations))
+
+## Tools
+
+| Tool | Type | Parameters | Returns |
+| --- | --- | --- | --- |
+| `search_patent` | EPO OPS (published-data search) | `ti`, `pa`, `pn`, `ap`, `pd_from`, `pd_to` — all optional | List of publication numbers (`country` + `doc-number` + `kind`) |
+| `get_patent_details` | EPO OPS (published-data biblio) | `pn` — required | `publication_number`, `filing_date`, `title`, `applicants` |
+| `expiration_date` | Local computation | `filing_date` — required | Filing date + 20 years, `YYYYMMDD` |
+
+`expiration_date` is deliberately a local, non-API tool, so that the model has to choose between *kinds* of tools rather than between similar API wrappers.
+
+All three schemas use `"strict": true`, which requires every property to be listed in `required`; optionality is expressed as `"type": ["string", "null"]`.
+
+## Requirements
+
+- Python 3.12+ (tested on 3.14)
+- OpenAI API key
+- EPO OPS consumer key and secret (free registration at the [EPO developer portal](https://developers.epo.org/))
+
+## Tech Stack
+
+- Python
+- OpenAI Responses API (`gpt-5.6-luna`), raw function calling — no agent framework
+- EPO OPS 3.2 REST API (OAuth2 client credentials, CQL search)
+- `requests`
+- `xml.etree.ElementTree` (standard library — chosen over `lxml`, since only a handful of fields are read)
+- SQLite3
+
+## Installation
+
+1. Clone the repository:
+
+    ```bash
+    git clone https://github.com/skykamil/patent-agent.git
+    cd patent-agent
+    ```
+
+2. Install dependencies:
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3. Create a `.env` file with:
+
+    ```
+    OPENAI_API_KEY=your-key-here
+    EPO_CONSUMER_KEY=your-epo-key-here
+    EPO_CONSUMER_SECRET=your-epo-secret-here
+    ```
+
+## Usage
+
+Running the script initialises the log database and executes the eval set — nothing else:
+
+```bash
+python patent_agent.py
+```
+
+Each case prints the model's raw output and the tool calls it made, followed by a final score (e.g. `10/10`).
+
+There is no interactive entry point. To run a single query, call `run_agent()` directly. `init_db()` must run first, otherwise `log_tool_call()` will fail on a missing table:
+
+```python
+from patent_agent import run_agent
+from logs_db import init_db
+
+init_db()
+run_agent("Get details for publication number: EP1000000")
+```
+
+`run_agent()` returns the list of tool calls that were made (used by the eval harness) and prints the model's final text answer.
+
+## Evaluation
+
+The eval set contains 10 cases covering each tool individually, a two-tool chain, all four date-range shapes, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
+
+A case passes only if the *entire* sequence matches: the number of calls, the tool names in order, and the expected arguments as a subset of the actual ones (`expected.items() <= actual.items()`, which tolerates the `null` values forced by `"strict": true`).
+
+Last verified: **10/10 on two consecutive runs.**
+
+The harness scores *tool selection only*. It does not check whether the data returned by EPO OPS is correct, nor whether the model's final text answer is accurate.
+
+## Logging
+
+Every tool call is written to `agent_logs` in `logs_db.db`:
+
+| Column | Description |
+| --- | --- |
+| `id` | Autoincrement primary key |
+| `run_id` | UUID4, shared by all calls within one `run_agent()` invocation |
+| `timestamp` | ISO 8601, local time |
+| `user_input` | The original natural-language question |
+| `tool_name` | Which tool was called |
+| `arguments` | Arguments the model supplied, as a JSON string |
+| `tool_output` | What the tool returned, as a JSON string |
+| `status` | `success` or `error` |
+| `error_message` | Exception text, `NULL` on success |
+
+`run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows.
+
+## Project Structure
+
+| File | Description |
+| --- | --- |
+| `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
+| `logs_db.py` | SQLite schema and tool-call logging |
+| `requirements.txt` | Python dependencies |
+| `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
+| `logs_db.db` | SQLite log file, created on first run (not tracked in the repo) |
+
+## Planned
+
+- Interactive CLI or REPL, replacing "edit the file and re-run" as the way to ask a question
+- Exception-type discrimination in the tool `try`/`except` — network failures (`requests.exceptions`) currently log identically to data failures (`AttributeError` on a missing element)
+- Open-ended date ranges through CQL relational operators, if Appendix 4.2 of the OPS reference guide (CQL index catalogue) can be reached — it was not retrievable through the documentation route used so far
+- Full typing of `input_list` (currently a bare `list`)
+- Generalising `get_applicants` the way `get_epodoc_value` generalised the publication/application reference lookups
+- Pagination for `search_patent` via the OPS `Range` header, plus surfacing the total hit count so truncated results are visible rather than silent
+
+## Out of Scope
+
+Deliberately excluded from this project: integration with commercial IP systems (Anaqua/AQX), multi-agent orchestration, agent frameworks (LangChain and similar), patent lifecycle documents beyond A1/B1 (A2, B2 and so on), and OPS services other than published-data search and biblio (images, fulltext, family, register, legal, classification, number-service).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Limitations
+
+**`expiration_date` is a 20-year arithmetic calculation, nothing more.** It adds 20 years to the filing date and returns the result. It does not account for supplementary protection certificates (SPCs), patent term extensions or adjustments, terminal disclaimers, renewal fee status, or early termination through withdrawal, lapse, revocation, or opposition. The function name promises considerably more than the implementation delivers. The output is not a reliable expiry date for any real patent and must not be relied on for any legal or docketing purpose.
+
+Other known limitations:
+
+- `search_patent` returns publication numbers only — no titles, applicants, or dates. Enriching results requires a separate `get_patent_details` call per number, which the tool description explicitly discourages the model from doing automatically.
+- `search_patent` does not send a `Range` header, so OPS returns only the first 25 results. Queries with more hits are silently truncated — neither the model nor the user is told that more results exist.
+- `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; if neither is present, parsing fails and the failure surfaces as a caught tool error rather than a result.
+- Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
+- The agent loop is hard-capped at three iterations. When the cap is hit, the loop simply stops — the user is not told the answer may be incomplete.
+- `run_agent()` has no memory between invocations. Each call starts from an empty `input_list`, so follow-up questions referring to a previous answer will not work.
+- `except Exception` catches every failure the same way. In the logs, a timeout, an HTTP error, and a parsing failure are distinguishable only by reading `error_message`.
+- No retry or backoff. EPO OPS applies quotas and throttling to free accounts; the exact limits were not established from the documentation that was reachable, and the code does not detect or handle a throttled response as anything other than a generic tool error.
+- The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
+- The eval score of 10/10 comes from two consecutive runs, not the three-or-more standard applied elsewhere in this line of projects. Model output is non-deterministic; treat the score as directional.
+- There are no unit tests. The eval set is the only automated check, and it covers tool selection, not data correctness.
+- `logs_db.db` is created relative to the current working directory, so running the script from different directories produces separate log databases.
