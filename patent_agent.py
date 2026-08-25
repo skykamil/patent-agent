@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 import json
 import requests
@@ -196,13 +197,9 @@ def expiration_date(filing_date):
       return expiration.strftime("%Y%m%d")
 
 
-def run_agent(user_input):
-    run_id = str(uuid.uuid4())
+def run_agent(input_list, run_id):
+    user_input = input_list[-1]["content"]
     actual_calls = []
-    input_list: list = [{
-        "role": "user",
-        "content": user_input
-    }]
     response = client.responses.create(
             model="gpt-5.6-luna",
             tools=tools,
@@ -248,10 +245,25 @@ def run_agent(user_input):
         print(response.output_text)
     return actual_calls
 
-def main():
+def run_repl():
+    run_id = str(uuid.uuid4())
+    input_list:list = []
+    while True:
+        user_input = input("N - New chat\nE - Exit\nHow can I help you?\n\n").lower().strip()
+        if user_input == "n":
+            input_list = []
+            run_id = str(uuid.uuid4())
+            continue
+        elif user_input == "e":
+            break
+        else:
+            input_list.append({
+                    "role": "user",
+                    "content": user_input
+                    })
+            run_agent(input_list, run_id)
 
-    init_db()
-
+def run_eval():
     eval_set = [
         {
             "input": "Search for a patent by applicant name: Siemens",
@@ -316,14 +328,25 @@ def main():
 
     count = 0
     for n, case in enumerate(eval_set, start=1):
+        run_id = str(uuid.uuid4())
         print(f"-------{n}------")
-        agent = run_agent(case["input"])
+        input_list = [{"role": "user", "content": case["input"]}]
+        agent = run_agent(input_list, run_id)
         print(case["input"], "→", agent)
         if len(agent) == len(case["expected_calls"]) and all(expected_call["name"] == actual_call["name"] and expected_call["args"].items() <= actual_call["args"].items()
                 for actual_call, expected_call in zip(agent, case["expected_calls"])):
                     count += 1
 
     print(f"{count}/{len(eval_set)}")
+
+def main():
+
+    init_db()
+
+    if "--eval" in sys.argv:
+        run_eval()
+    else:
+        run_repl()
 
 if __name__ == "__main__":
     main()

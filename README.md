@@ -4,7 +4,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 ## Status
 
-**Work in progress.** This is an in-development learning project, not a finished tool. There is no interactive mode: running the script executes a fixed eval set. The sections below separate what is implemented from what is not.
+**Work in progress.** This is an in-development learning project, not a finished tool. The sections below separate what is implemented from what is not.
 
 Implemented:
 
@@ -16,10 +16,10 @@ Implemented:
 - Per-tool `try`/`except`: a failing tool returns an error object to the model as a normal `function_call_output` instead of crashing the run
 - SQLite logging of every tool call, grouped by `run_id`
 - Eval harness: 10 cases, including one negative case where no tool should be called
+- Interactive REPL (`run_repl()`) as the default mode — conversation history persists across turns in a session; `N` starts a new conversation (new `run_id`, cleared history), `E` exits
 
 Not implemented (see [Planned](#planned)):
 
-- Interactive CLI or REPL
 - Exception-type discrimination — `except Exception` currently treats every failure identically
 - Open-ended date ranges via CQL relational operators (handled in Python instead, see [Limitations](#limitations))
 
@@ -75,25 +75,29 @@ All three schemas use `"strict": true`, which requires every property to be list
 
 ## Usage
 
-Running the script initialises the log database and executes the eval set — nothing else:
+Running the script starts an interactive REPL:
 
 ```bash
 python patent_agent.py
 ```
 
-Each case prints the model's raw output and the tool calls it made, followed by a final score (e.g. `10/10`).
+Each prompt shows three options:
 
-There is no interactive entry point. To run a single query, call `run_agent()` directly. `init_db()` must run first, otherwise `log_tool_call()` will fail on a missing table:
-
-```python
-from patent_agent import run_agent
-from logs_db import init_db
-
-init_db()
-run_agent("Get details for publication number: EP1000000")
+```
+N - New chat
+E - Exit
+How can I help you?
 ```
 
-`run_agent()` returns the list of tool calls that were made (used by the eval harness) and prints the model's final text answer.
+Type a natural-language question to have the agent answer it. Conversation history persists across turns within a session, so follow-up questions can refer to a previous answer without repeating details (e.g. asking "when will it expire?" after already looking up a patent's filing date). `N` clears the history and starts a new `run_id` for logging; `E` exits the program.
+
+To run the eval harness instead of the REPL:
+
+```bash
+python patent_agent.py --eval
+```
+
+This executes the fixed 10-case eval set and prints a final score (e.g. `10/10`).
 
 ## Evaluation
 
@@ -112,7 +116,7 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 | Column | Description |
 | --- | --- |
 | `id` | Autoincrement primary key |
-| `run_id` | UUID4, shared by all calls within one `run_agent()` invocation |
+| `run_id` | UUID4, shared by all calls within one REPL conversation (until `N` starts a new one) or one eval case |
 | `timestamp` | ISO 8601, local time |
 | `user_input` | The original natural-language question |
 | `tool_name` | Which tool was called |
@@ -135,7 +139,6 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 
 ## Planned
 
-- Interactive CLI or REPL, replacing "edit the file and re-run" as the way to ask a question
 - Exception-type discrimination in the tool `try`/`except` — network failures (`requests.exceptions`) currently log identically to data failures (`AttributeError` on a missing element)
 - Open-ended date ranges through CQL relational operators, if Appendix 4.2 of the OPS reference guide (CQL index catalogue) can be reached — it was not retrievable through the documentation route used so far
 - Full typing of `input_list` (currently a bare `list`)
@@ -161,7 +164,7 @@ Other known limitations:
 - `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; if neither is present, parsing fails and the failure surfaces as a caught tool error rather than a result.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
 - The agent loop is hard-capped at three iterations. When the cap is hit, the loop simply stops — the user is not told the answer may be incomplete.
-- `run_agent()` has no memory between invocations. Each call starts from an empty `input_list`, so follow-up questions referring to a previous answer will not work.
+- Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
 - `except Exception` catches every failure the same way. In the logs, a timeout, an HTTP error, and a parsing failure are distinguishable only by reading `error_message`.
 - No retry or backoff. EPO OPS applies quotas and throttling to free accounts; the exact limits were not established from the documentation that was reachable, and the code does not detect or handle a throttled response as anything other than a generic tool error.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
