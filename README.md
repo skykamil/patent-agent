@@ -122,17 +122,18 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 | `tool_name` | Which tool was called |
 | `arguments` | Arguments the model supplied, as a JSON string |
 | `tool_output` | What the tool returned, as a JSON string |
-| `status` | `success` or `error` |
+| `status` | `success`, `error`, or `no_tool_call` |
 | `error_message` | Exception text, `NULL` on success |
+| `final_response` | The model's final text answer for that turn, as a plain string |
 
-`run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows.
+`run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows. Each row also carries the model's final response for that turn — even when a tool was called, so the row shows both the tool call and the text the model ultimately gave the user.
 
 ## Project Structure
 
 | File | Description |
 | --- | --- |
 | `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
-| `logs_db.py` | SQLite schema and tool-call logging |
+| `logs_db.py` | SQLite schema, tool-call logging, and final-response updates |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
 | `logs_db.db` | SQLite log file, created on first run (not tracked in the repo) |

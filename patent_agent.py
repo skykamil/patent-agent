@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from openai import OpenAI
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from logs_db import init_db, log_tool_call
+from logs_db import init_db, log_tool_call, update_final_response
 from openai.types.responses.function_tool_param import FunctionToolParam
 
 load_dotenv()
@@ -198,6 +198,7 @@ def expiration_date(filing_date):
 
 
 def run_agent(input_list, run_id):
+    logged_ids = []
     user_input = input_list[-1]["content"]
     actual_calls = []
     response = client.responses.create(
@@ -234,7 +235,8 @@ def run_agent(input_list, run_id):
                                 "output": json.dumps(patent_records)
                             }
                             input_list.append(function_call_output)
-                            log_tool_call(run_id, user_input, item.name, json.dumps(args), json.dumps(patent_records), status, error_message)
+                            log_id = log_tool_call(run_id, user_input, item.name, json.dumps(args), json.dumps(patent_records), status, error_message, final_response=None)
+                            logged_ids.append(log_id)
         response = client.responses.create(
                 model="gpt-5.6-luna",
                 tools=tools,
@@ -242,7 +244,12 @@ def run_agent(input_list, run_id):
         )
         input_list += response.output
         i += 1
-        print(response.output_text)
+    final_response = response.output_text
+    print(final_response)
+    for log_id in logged_ids:
+        update_final_response(log_id, final_response)
+    if not actual_calls:    
+        log_tool_call(run_id, user_input, tool_name=None, arguments=None, tool_output=None, status="no_tool_call", error_message=None, final_response=final_response)
     return actual_calls
 
 def run_repl():
