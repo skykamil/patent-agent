@@ -148,7 +148,7 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 
 ## Out of Scope
 
-Deliberately excluded from this project: integration with commercial IP systems (Anaqua/AQX), multi-agent orchestration, agent frameworks (LangChain and similar), patent lifecycle documents beyond A1/B1 (A2, B2 and so on), and OPS services other than published-data search and biblio (images, fulltext, family, register, legal, classification, number-service).
+Deliberately excluded from this project: integration with commercial patent/IP management platforms, multi-agent orchestration, agent frameworks (LangChain and similar), patent lifecycle documents beyond A1/B1 (A2, B2 and so on), and OPS services other than published-data search and biblio (images, fulltext, family, register, legal, classification, number-service).
 
 ## License
 
