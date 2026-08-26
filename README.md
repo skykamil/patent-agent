@@ -17,10 +17,10 @@ Implemented:
 - SQLite logging of every tool call, grouped by `run_id`
 - Eval harness: 10 cases, including one negative case where no tool should be called
 - Interactive REPL (`run_repl()`) as the default mode — conversation history persists across turns in a session; `N` starts a new conversation (new `run_id`, cleared history), `E` exits
+- Exception-type discrimination: network/HTTP errors (`requests.exceptions.RequestException`, surfaced via `raise_for_status()`), XML parsing errors (`ET.ParseError`), and a generic fallback are logged with distinct `status` values (`network_error`, `parse_error`, `error`)
 
 Not implemented (see [Planned](#planned)):
 
-- Exception-type discrimination — `except Exception` currently treats every failure identically
 - Open-ended date ranges via CQL relational operators (handled in Python instead, see [Limitations](#limitations))
 
 ## Tools
@@ -122,7 +122,7 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 | `tool_name` | Which tool was called |
 | `arguments` | Arguments the model supplied, as a JSON string |
 | `tool_output` | What the tool returned, as a JSON string |
-| `status` | `success`, `error`, or `no_tool_call` |
+| `status` | `success`, `network_error`, `parse_error`, `error`, or `no_tool_call` |
 | `error_message` | Exception text, `NULL` on success |
 | `final_response` | The model's final text answer for that turn, as a plain string |
 
@@ -140,7 +140,6 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 
 ## Planned
 
-- Exception-type discrimination in the tool `try`/`except` — network failures (`requests.exceptions`) currently log identically to data failures (`AttributeError` on a missing element)
 - Open-ended date ranges through CQL relational operators, if Appendix 4.2 of the OPS reference guide (CQL index catalogue) can be reached — it was not retrievable through the documentation route used so far
 - Full typing of `input_list` (currently a bare `list`)
 - Generalising `get_applicants` the way `get_epodoc_value` generalised the publication/application reference lookups
@@ -166,8 +165,8 @@ Other known limitations:
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
 - The agent loop is hard-capped at three iterations. When the cap is hit, the loop simply stops — the user is not told the answer may be incomplete.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
-- `except Exception` catches every failure the same way. In the logs, a timeout, an HTTP error, and a parsing failure are distinguishable only by reading `error_message`.
-- No retry or backoff. EPO OPS applies quotas and throttling to free accounts; the exact limits were not established from the documentation that was reachable, and the code does not detect or handle a throttled response as anything other than a generic tool error.
+- Exception handling distinguishes network/HTTP errors and XML parsing errors from other failures via `status`, but everything else (e.g. missing/malformed data after a successful parse) still falls into the generic `error` status.
+- A throttled response (HTTP 429) is caught the same way as any other HTTP error and logged with `status="network_error"` — there is no dedicated detection, backoff, or retry logic specific to rate limiting.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The eval score of 10/10 comes from two consecutive runs, not the three-or-more standard applied elsewhere in this line of projects. Model output is non-deterministic; treat the score as directional.
 - There are no unit tests. The eval set is the only automated check, and it covers tool selection, not data correctness.

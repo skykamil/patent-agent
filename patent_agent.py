@@ -103,6 +103,7 @@ def get_epo_access_token():
         return epo_token
     else:
         r = requests.post('https://ops.epo.org/3.2/auth/accesstoken', auth=(consumer_key, secret_consumer), data={'grant_type': 'client_credentials'})
+        r.raise_for_status()
         data = r.json()
         epo_token = data["access_token"]
         now = datetime.now()
@@ -154,6 +155,7 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None):
             query.append(f'{name}="{value}"')
     query_string = " and ".join(query)
     r = requests.get("https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string})
+    r.raise_for_status()
     root = ET.fromstring(r.text)
     results = root.findall('.//ops:publication-reference', ns)
     publications = []
@@ -175,6 +177,7 @@ def get_patent_details(pn):
     token = get_epo_access_token()
     headers = {"Authorization": f"Bearer {token}"}
     r = requests.get(f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{pn}/biblio", headers=headers)
+    r.raise_for_status()
     root = ET.fromstring(r.text)
     documents = root.findall('.//ex:exchange-document', ns)
     patent = None
@@ -221,6 +224,14 @@ def run_agent(input_list, run_id):
                                     patent_records = get_patent_details(**args)
                                 else:
                                     patent_records = expiration_date(**args)
+                            except requests.exceptions.RequestException as e:
+                                patent_records = {"error": f"Network error in {item.name}: {str(e)}"}
+                                status = "network_error"
+                                error_message = str(e)
+                            except ET.ParseError as e:
+                                patent_records = {"error": f"Could not parse response for {item.name}: {str(e)}"}
+                                status = "parse_error"
+                                error_message = str(e)
                             except Exception as e:
                                 patent_records = {"error": f"Could not complete {item.name}: {str(e)}"}
                                 status = "error"
