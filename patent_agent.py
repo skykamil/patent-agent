@@ -4,11 +4,13 @@ import uuid
 import json
 import requests
 import xml.etree.ElementTree as ET
+from typing import cast
 from openai import OpenAI
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from logs_db import init_db, log_tool_call, update_final_response
 from openai.types.responses.function_tool_param import FunctionToolParam
+from openai.types.responses.response_input_param import ResponseInputParam, ResponseInputItemParam, FunctionCallOutput
 
 load_dotenv()
 
@@ -118,6 +120,16 @@ def get_epodoc_value(patent, container, child_tag):
             number = doc_id.find(f'ex:{child_tag}', ns)
             return number.text
 
+def get_filtered_values(patent, element_tag, attribute_name, attribute_value, child_tag):
+    matching_elements = patent.findall(f'.//ex:{element_tag}', ns)
+    values = []
+    for element in matching_elements:
+        if element.get(attribute_name) == attribute_value:
+            element_name = element.find(f'.//ex:{child_tag}', ns)
+            values.append(element_name.text)
+    return values
+
+
 def get_title(patent):
     title = None
     ref = patent.find(f'.//ex:bibliographic-data', ns)
@@ -128,13 +140,7 @@ def get_title(patent):
     return title
 
 def get_applicants(patent):
-    applicant_elements = patent.findall(f'.//ex:applicant', ns)
-    applicants = []
-    for applicant in applicant_elements:
-        if applicant.get("data-format") == "epodoc":
-            name_elem = applicant.find('.//ex:name', ns)
-            applicants.append(name_elem.text)
-    return applicants
+    return get_filtered_values(patent, 'applicant', 'data-format', 'epodoc', 'name')
 
 def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None):
     token = get_epo_access_token()
@@ -200,9 +206,8 @@ def expiration_date(filing_date):
       return expiration.strftime("%Y%m%d")
 
 
-def run_agent(input_list, run_id):
+def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
     logged_ids = []
-    user_input = input_list[-1]["content"]
     actual_calls = []
     response = client.responses.create(
             model="gpt-5.6-luna",
@@ -210,10 +215,12 @@ def run_agent(input_list, run_id):
             input=input_list,
     )
     print(response.output)
-    input_list += response.output
+    for item in response.output:
+        input_list.append(cast(ResponseInputItemParam, item))
     i=0
     while any(item.type == "function_call" for item in response.output) and i < 3:
         for item in response.output:
+                item.model_dump()
                 if item.type == "function_call":
                         if item.name in ["search_patent", "get_patent_details", "expiration_date"]:
                             args = json.loads(item.arguments)
@@ -240,7 +247,7 @@ def run_agent(input_list, run_id):
                                 status = "success"
                                 error_message = None
                             actual_calls.append({"name": item.name, "args": args})
-                            function_call_output = {
+                            function_call_output: FunctionCallOutput = {
                                 "type": "function_call_output",
                                 "call_id": item.call_id,
                                 "output": json.dumps(patent_records)
@@ -253,7 +260,8 @@ def run_agent(input_list, run_id):
                 tools=tools,
                 input=input_list,
         )
-        input_list += response.output
+        for item in response.output:
+            input_list.append(cast(ResponseInputItemParam, item))
         i += 1
     final_response = response.output_text
     print(final_response)
@@ -265,7 +273,7 @@ def run_agent(input_list, run_id):
 
 def run_repl():
     run_id = str(uuid.uuid4())
-    input_list:list = []
+    input_list: ResponseInputParam = []
     while True:
         user_input = input("N - New chat\nE - Exit\nHow can I help you?\n\n").lower().strip()
         if user_input == "n":
@@ -279,7 +287,7 @@ def run_repl():
                     "role": "user",
                     "content": user_input
                     })
-            run_agent(input_list, run_id)
+            run_agent(input_list, run_id, user_input)
 
 def run_eval():
     eval_set = [
@@ -348,8 +356,10 @@ def run_eval():
     for n, case in enumerate(eval_set, start=1):
         run_id = str(uuid.uuid4())
         print(f"-------{n}------")
-        input_list = [{"role": "user", "content": case["input"]}]
-        agent = run_agent(input_list, run_id)
+        user_input = case["input"]
+        assert isinstance(user_input, str)
+        input_list: ResponseInputParam = [{"role": "user", "content": user_input}]
+        agent = run_agent(input_list, run_id, user_input)
         print(case["input"], "→", agent)
         if len(agent) == len(case["expected_calls"]) and all(expected_call["name"] == actual_call["name"] and expected_call["args"].items() <= actual_call["args"].items()
                 for actual_call, expected_call in zip(agent, case["expected_calls"])):

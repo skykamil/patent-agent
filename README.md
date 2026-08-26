@@ -18,6 +18,8 @@ Implemented:
 - Eval harness: 10 cases, including one negative case where no tool should be called
 - Interactive REPL (`run_repl()`) as the default mode — conversation history persists across turns in a session; `N` starts a new conversation (new `run_id`, cleared history), `E` exits
 - Exception-type discrimination: network/HTTP errors (`requests.exceptions.RequestException`, surfaced via `raise_for_status()`), XML parsing errors (`ET.ParseError`), and a generic fallback are logged with distinct `status` values (`network_error`, `parse_error`, `error`)
+- Full typing of conversation history using the OpenAI SDK `ResponseInputParam` / `ResponseInputItemParam` types
+- Reusable XML helper for attribute-filtered list extraction; `get_applicants` now delegates to the generalised parser
 
 Not implemented (see [Planned](#planned)):
 
@@ -141,9 +143,8 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 ## Planned
 
 - Open-ended date ranges through CQL relational operators, if Appendix 4.2 of the OPS reference guide (CQL index catalogue) can be reached — it was not retrievable through the documentation route used so far
-- Full typing of `input_list` (currently a bare `list`)
-- Generalising `get_applicants` the way `get_epodoc_value` generalised the publication/application reference lookups
 - Pagination for `search_patent` via the OPS `Range` header, plus surfacing the total hit count so truncated results are visible rather than silent
+- Evaluation of the agent's final text response in addition to the existing tool-selection eval
 
 ## Out of Scope
 
