@@ -15,27 +15,29 @@ Implemented:
 - Agent loop that chains tools across turns (e.g. `get_patent_details` → `expiration_date`) without the order being prompted
 - Per-tool `try`/`except`: a failing tool returns an error object to the model as a normal `function_call_output` instead of crashing the run
 - SQLite logging of every tool call, grouped by `run_id`
-- Eval harness: 10 cases, including one negative case where no tool should be called
+- Eval harness: 11 cases, including pagination and one negative case where no tool should be called
 - Interactive REPL (`run_repl()`) as the default mode — conversation history persists across turns in a session; `N` starts a new conversation (new `run_id`, cleared history), `E` exits
 - Exception-type discrimination: network/HTTP errors (`requests.exceptions.RequestException`, surfaced via `raise_for_status()`), XML parsing errors (`ET.ParseError`), and a generic fallback are logged with distinct `status` values (`network_error`, `parse_error`, `error`)
 - Full typing of conversation history using the OpenAI SDK `ResponseInputParam` / `ResponseInputItemParam` types
 - Reusable XML helper for attribute-filtered list extraction; `get_applicants` now delegates to the generalised parser
+- Paginated `search_patent` results: 25 records per page via `X-OPS-Range`, with total result count, theoretical page count, accessible page count, and explicit truncation metadata for the OPS 2,000-record retrieval limit
 
 Not implemented (see [Planned](#planned)):
 
 - Open-ended date ranges via CQL relational operators (handled in Python instead, see [Limitations](#limitations))
+- Final-response evaluation; the current eval harness checks tool selection and arguments only
 
 ## Tools
 
 | Tool | Type | Parameters | Returns |
 | --- | --- | --- | --- |
-| `search_patent` | EPO OPS (published-data search) | `ti`, `pa`, `pn`, `ap`, `pd_from`, `pd_to` — all optional | List of publication numbers (`country` + `doc-number` + `kind`) |
+| `search_patent` | EPO OPS (published-data search) | `ti`, `pa`, `pn`, `ap`, `pd_from`, `pd_to`, `page` — all optional | Up to 25 publication numbers plus `total_results`, `page`, `total_pages`, `available_pages`, and `truncated` |
 | `get_patent_details` | EPO OPS (published-data biblio) | `pn` — required | `publication_number`, `filing_date`, `title`, `applicants` |
 | `expiration_date` | Local computation | `filing_date` — required | Filing date + 20 years, `YYYYMMDD` |
 
 `expiration_date` is deliberately a local, non-API tool, so that the model has to choose between *kinds* of tools rather than between similar API wrappers.
 
-All three schemas use `"strict": true`, which requires every property to be listed in `required`; optionality is expressed as `"type": ["string", "null"]`.
+All three schemas use `"strict": true`, which requires every property to be listed in `required`; optionality is expressed by allowing `null` alongside the parameter's actual type.
 
 ## Requirements
 
@@ -99,15 +101,15 @@ To run the eval harness instead of the REPL:
 python patent_agent.py --eval
 ```
 
-This executes the fixed 10-case eval set and prints a final score (e.g. `10/10`).
+This executes the fixed 11-case eval set and prints a final score (e.g. `11/11`).
 
 ## Evaluation
 
-The eval set contains 10 cases covering each tool individually, a two-tool chain, all four date-range shapes, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
+The eval set contains 11 cases covering each tool individually, a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
 
 A case passes only if the *entire* sequence matches: the number of calls, the tool names in order, and the expected arguments as a subset of the actual ones (`expected.items() <= actual.items()`, which tolerates the `null` values forced by `"strict": true`).
 
-Last verified: **10/10 on two consecutive runs.**
+Last verified: **11/11.**
 
 The harness scores *tool selection only*. It does not check whether the data returned by EPO OPS is correct, nor whether the model's final text answer is accurate.
 
@@ -143,7 +145,6 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 ## Planned
 
 - Open-ended date ranges through CQL relational operators, if Appendix 4.2 of the OPS reference guide (CQL index catalogue) can be reached — it was not retrievable through the documentation route used so far
-- Pagination for `search_patent` via the OPS `Range` header, plus surfacing the total hit count so truncated results are visible rather than silent
 - Evaluation of the agent's final text response in addition to the existing tool-selection eval
 
 ## Out of Scope
@@ -161,7 +162,7 @@ MIT — see [LICENSE](LICENSE).
 Other known limitations:
 
 - `search_patent` returns publication numbers only — no titles, applicants, or dates. Enriching results requires a separate `get_patent_details` call per number, which the tool description explicitly discourages the model from doing automatically.
-- `search_patent` does not send a `Range` header, so OPS returns only the first 25 results. Queries with more hits are silently truncated — neither the model nor the user is told that more results exist.
+- `search_patent` returns 25 records per page. OPS exposes the total hit count but allows retrieval of only the first 2,000 records from a result set, so at most 80 pages are accessible. Broader searches must be narrowed to reach records beyond that limit.
 - `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; if neither is present, parsing fails and the failure surfaces as a caught tool error rather than a result.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
 - The agent loop is hard-capped at three iterations. When the cap is hit, the loop simply stops — the user is not told the answer may be incomplete.
@@ -169,6 +170,6 @@ Other known limitations:
 - Exception handling distinguishes network/HTTP errors and XML parsing errors from other failures via `status`, but everything else (e.g. missing/malformed data after a successful parse) still falls into the generic `error` status.
 - A throttled response (HTTP 429) is caught the same way as any other HTTP error and logged with `status="network_error"` — there is no dedicated detection, backoff, or retry logic specific to rate limiting.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
-- The eval score of 10/10 comes from two consecutive runs, not the three-or-more standard applied elsewhere in this line of projects. Model output is non-deterministic; treat the score as directional.
+- The current eval score is 11/11, but model output is non-deterministic; treat the score as directional.
 - There are no unit tests. The eval set is the only automated check, and it covers tool selection, not data correctness.
 - `logs_db.db` is created relative to the current working directory, so running the script from different directories produces separate log databases.

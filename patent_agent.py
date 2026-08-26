@@ -25,7 +25,7 @@ tools: list[FunctionToolParam] = [
     {
         "type": "function",
         "name": "search_patent",
-        "description": "Searches for patents in the EPO database by title, applicant name, publication number, application number, or publication date. Use when the user wants to find or look up a patent.",
+        "description": "Searches for patents in the EPO database by title, applicant name, publication number, application number, publication date, and result page. Use when the user wants to find or look up patents. Each page contains up to 25 results. When presenting search results, list EVERY publication number returned in 'results' for the current page; do not sample, summarize, or omit any returned result. Clearly state the total number of matching records, the current page and total pages, the number of results shown, and the number of available pages. If 'truncated' is true, explain that OPS limits retrieval to the first 2,000 records, so only the first 80 pages of 25 results are accessible even when more matches exist.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -53,8 +53,12 @@ tools: list[FunctionToolParam] = [
                     "type": ["string", "null"],
                     "description": "End of the publication date range, in YYYYMMDD format. If the user wants publications before a certain date with no start date, provide only this. For an exact single date, set both pd_from and pd_to to the same value. Do not guess or fill in pd_from yourself — the system handles the missing bound automatically."
                 },
+                "page": {
+                    "type": ["integer", "null"],
+                    "description": "Results page to retrieve, starting from 1. Each page contains up to 25 results. Null defaults to the first page."
+                },
             },
-            "required": ["ti", "pa", "pn", "ap", "pd_from", "pd_to"],
+            "required": ["ti", "pa", "pn", "ap", "pd_from", "pd_to", "page"],
             "additionalProperties": False
         },
         "strict": True
@@ -142,9 +146,15 @@ def get_title(patent):
 def get_applicants(patent):
     return get_filtered_values(patent, 'applicant', 'data-format', 'epodoc', 'name')
 
-def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None):
+def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, page=None):
+    if page is None:
+        page = 1
+    if page < 1 or page > 80:
+        raise ValueError("Page must be between 1 and 80")
+    range_start = (page - 1) * 25 + 1
+    range_stop = range_start + 24
     token = get_epo_access_token()
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "X-OPS-Range": f"{range_start}-{range_stop}"}
     query = []
     pd = ""
     if (pd_from is not None and pd_to is not None):
@@ -163,6 +173,14 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None):
     r = requests.get("https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string})
     r.raise_for_status()
     root = ET.fromstring(r.text)
+    search_info = root.find('.//ops:biblio-search', ns)
+    assert search_info is not None, "Missing biblio-search"
+    result_count = search_info.get("total-result-count")
+    assert result_count is not None, "Missing total-result-count"
+    result_count = int(result_count)
+    total_pages = (result_count + 24) // 25
+    available_pages = min(total_pages, 80)
+    truncated = result_count > 2000
     results = root.findall('.//ops:publication-reference', ns)
     publications = []
     for result in results:
@@ -176,7 +194,14 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None):
         assert number.text is not None, "Missing number"
         assert kind.text is not None, "Missing kind"
         publications.append(country.text + number.text + kind.text)
-    return publications
+    return {
+        "results": publications,
+        "total_results": result_count,
+        "page": page,
+        "total_pages": total_pages,
+        "available_pages": available_pages,
+        "truncated": truncated        
+    }
 
 def get_patent_details(pn):
     details = {}
@@ -275,7 +300,7 @@ def run_repl():
     run_id = str(uuid.uuid4())
     input_list: ResponseInputParam = []
     while True:
-        user_input = input("N - New chat\nE - Exit\nHow can I help you?\n\n").lower().strip()
+        user_input = input("\nN - New chat\nE - Exit\nHow can I help you?\n\n").lower().strip()
         if user_input == "n":
             input_list = []
             run_id = str(uuid.uuid4())
@@ -295,6 +320,12 @@ def run_eval():
             "input": "Search for a patent by applicant name: Siemens",
             "expected_calls": [
                 {"name": "search_patent", "args": {"pa": "Siemens"}}
+            ]
+        },
+        {
+            "input": "Search for Siemens patents, page 2",
+            "expected_calls": [
+                {"name": "search_patent", "args": {"pa": "Siemens", "page": 2}}
             ]
         },
         {
