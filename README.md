@@ -1,10 +1,10 @@
 # Patent Research Agent
 
-A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite logging of every tool call, and an eval harness that checks which tools the model chooses for a given natural-language question.
+A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite logging of every tool call, and an eval harness that checks both tool-call behavior and the agent's final response.
 
 ## Status
 
-**Work in progress.** This is an in-development learning project, not a finished tool. The sections below separate what is implemented from what is not.
+**Core agent complete — v1.0.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
 Implemented:
 
@@ -12,20 +12,16 @@ Implemented:
 - `search_patent` — CQL query built dynamically from any combination of title, applicant, publication number, application number, and a publication date range
 - `get_patent_details` — bibliographic data for one publication, parsed from OPS XML
 - `expiration_date` — local calculation, no API call
-- Agent loop that chains tools across turns (e.g. `get_patent_details` → `expiration_date`) without the order being prompted
+- Agent loop that chains tools within a turn (e.g. `get_patent_details` → `expiration_date`) without the order being prompted
 - Per-tool `try`/`except`: a failing tool returns an error object to the model as a normal `function_call_output` instead of crashing the run
 - SQLite logging of every tool call, grouped by `run_id`
-- Eval harness: 11 cases, including pagination and one negative case where no tool should be called
+- Eval harness: 11 cases covering tool selection, pagination, date-range behavior, a two-tool chain, a no-tool case, and deterministic checks of the final response
 - Interactive REPL (`run_repl()`) as the default mode — conversation history persists across turns in a session; `N` starts a new conversation (new `run_id`, cleared history), `E` exits
 - Exception-type discrimination: network/HTTP errors (`requests.exceptions.RequestException`, surfaced via `raise_for_status()`), XML parsing errors (`ET.ParseError`), and a generic fallback are logged with distinct `status` values (`network_error`, `parse_error`, `error`)
 - Full typing of conversation history using the OpenAI SDK `ResponseInputParam` / `ResponseInputItemParam` types
 - Reusable XML helper for attribute-filtered list extraction; `get_applicants` now delegates to the generalised parser
 - Paginated `search_patent` results: 25 records per page via `X-OPS-Range`, with total result count, theoretical page count, accessible page count, and explicit truncation metadata for the OPS 2,000-record retrieval limit
-
-Not implemented (see [Planned](#planned)):
-
-- Open-ended date ranges via CQL relational operators (handled in Python instead, see [Limitations](#limitations))
-- Final-response evaluation; the current eval harness checks tool selection and arguments only
+- Final-response evaluation: static checks for stable known answers plus dynamic checks against the actual `search_patent` output, including every returned publication number, pagination metadata, and the OPS retrieval-limit notice when applicable
 
 ## Tools
 
@@ -33,7 +29,7 @@ Not implemented (see [Planned](#planned)):
 | --- | --- | --- | --- |
 | `search_patent` | EPO OPS (published-data search) | `ti`, `pa`, `pn`, `ap`, `pd_from`, `pd_to`, `page` — all optional | Up to 25 publication numbers plus `total_results`, `page`, `total_pages`, `available_pages`, and `truncated` |
 | `get_patent_details` | EPO OPS (published-data biblio) | `pn` — required | `publication_number`, `filing_date`, `title`, `applicants` |
-| `expiration_date` | Local computation | `filing_date` — required | Filing date + 20 years, `YYYYMMDD` |
+| `expiration_date` | Local computation | `filing_date` — required | Simplified filing date + 20 years, `YYYYMMDD` |
 
 `expiration_date` is deliberately a local, non-API tool, so that the model has to choose between *kinds* of tools rather than between similar API wrappers.
 
@@ -101,17 +97,30 @@ To run the eval harness instead of the REPL:
 python patent_agent.py --eval
 ```
 
-This executes the fixed 11-case eval set and prints a final score (e.g. `11/11`).
+This executes the fixed 11-case eval set and prints separate tool-call and final-response scores.
 
 ## Evaluation
 
 The eval set contains 11 cases covering each tool individually, a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
 
-A case passes only if the *entire* sequence matches: the number of calls, the tool names in order, and the expected arguments as a subset of the actual ones (`expected.items() <= actual.items()`, which tolerates the `null` values forced by `"strict": true`).
+### Tool-call evaluation
 
-Last verified: **11/11.**
+A case passes only if the *entire* expected call sequence matches: the number of calls, the tool names in order, and the expected arguments as a subset of the actual ones (`expected.items() <= actual.items()`, which tolerates the `null` values forced by `"strict": true`).
 
-The harness scores *tool selection only*. It does not check whether the data returned by EPO OPS is correct, nor whether the model's final text answer is accurate.
+### Final-response evaluation
+
+The final response is checked deterministically rather than with an LLM judge.
+
+For stable cases, the harness checks required response content. For `search_patent`, it validates the answer against the actual tool output from that run: every returned publication number must be present, the reported page must match `page X of Y`, the total result count and accessible page count must appear, and truncated result sets must mention the 2,000-record OPS retrieval limit.
+
+The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
+
+Last verified on **2026-08-26**:
+
+- **Tool-call eval: 11/11**
+- **Final-response eval: 11/11**
+
+The harness does not independently verify that EPO OPS data itself is correct, and it is not a legal-status validator. It checks whether the agent selected the expected tools and whether its final answer reflects the returned tool data and required caveats.
 
 ## Logging
 
@@ -142,10 +151,15 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
 | `logs_db.db` | SQLite log file, created on first run (not tracked in the repo) |
 
-## Planned
+## Next
 
-- Open-ended date ranges through CQL relational operators, if Appendix 4.2 of the OPS reference guide (CQL index catalogue) can be reached — it was not retrievable through the documentation route used so far
-- Evaluation of the agent's final text response in addition to the existing tool-selection eval
+Version 1.0 closes the core agent behavior. Further work on this repository will focus on productionization rather than expanding the patent-domain feature set:
+
+- FastAPI/API interface
+- Runtime safeguards, limits, and timeouts
+- Docker and deployment
+- Observability for errors, latency, and token usage
+- Retry/backoff behavior for external API failures and rate limits
 
 ## Out of Scope
 
@@ -157,7 +171,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Limitations
 
-**`expiration_date` is a 20-year arithmetic calculation, nothing more.** It adds 20 years to the filing date and returns the result. It does not account for supplementary protection certificates (SPCs), patent term extensions or adjustments, terminal disclaimers, renewal fee status, or early termination through withdrawal, lapse, revocation, or opposition. The function name promises considerably more than the implementation delivers. The output is not a reliable expiry date for any real patent and must not be relied on for any legal or docketing purpose.
+**`expiration_date` is a simplified 20-year arithmetic calculation, nothing more.** It adds 20 years to the filing date and returns the result. It does not account for supplementary protection certificates (SPCs), patent term extensions or adjustments, terminal disclaimers, renewal fee status, or early termination through withdrawal, lapse, revocation, or opposition. The agent is explicitly instructed to present the result as a simplified filing-date-plus-20-years calculation, not as a verified legal expiration date. The output must not be relied on for legal or docketing purposes.
 
 Other known limitations:
 
@@ -170,6 +184,6 @@ Other known limitations:
 - Exception handling distinguishes network/HTTP errors and XML parsing errors from other failures via `status`, but everything else (e.g. missing/malformed data after a successful parse) still falls into the generic `error` status.
 - A throttled response (HTTP 429) is caught the same way as any other HTTP error and logged with `status="network_error"` — there is no dedicated detection, backoff, or retry logic specific to rate limiting.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
-- The current eval score is 11/11, but model output is non-deterministic; treat the score as directional.
-- There are no unit tests. The eval set is the only automated check, and it covers tool selection, not data correctness.
+- The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
+- There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.
 - `logs_db.db` is created relative to the current working directory, so running the script from different directories produces separate log databases.
