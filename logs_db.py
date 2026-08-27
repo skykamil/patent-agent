@@ -22,8 +22,45 @@ def init_db():
             final_response TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conversations(
+            conversation_id TEXT PRIMARY KEY,
+            history TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
     con.commit()
     con.close()
+
+def save_conversation(conversation_id, history):
+    con = get_connection()
+    cur = con.cursor()
+    timestamp = datetime.now().isoformat()
+    cur.execute(
+        """
+        INSERT INTO conversations (conversation_id, history, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(conversation_id) DO UPDATE SET
+            history=excluded.history,
+            updated_at=excluded.updated_at
+        """,
+        (conversation_id, history, timestamp, timestamp)
+    )
+    con.commit()
+    con.close()
+
+def load_conversation(conversation_id):
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute(
+        "SELECT history FROM conversations WHERE conversation_id = ?", (conversation_id,)
+    )
+    row = cur.fetchone()
+    con.close()
+    if row is None:
+        return None
+    return row[0]
 
 def log_tool_call(run_id, user_input, tool_name, arguments, tool_output, status, error_message, final_response):
     con = get_connection()
@@ -35,7 +72,7 @@ def log_tool_call(run_id, user_input, tool_name, arguments, tool_output, status,
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (run_id, timestamp, user_input, tool_name, arguments, tool_output, status, error_message, final_response)
-        )
+    )
     log_id = cur.lastrowid
     con.commit()
     con.close()

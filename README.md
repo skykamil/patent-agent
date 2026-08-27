@@ -4,9 +4,11 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 ## Status
 
-**Core agent complete — v1.0.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
+**Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Implemented:
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. The first productionization layer adds a FastAPI HTTP interface and persistent multi-turn conversation state in SQLite.
+
+### Core v1.0
 
 - OAuth2 client-credentials flow against EPO OPS, with the token cached in memory and refreshed 30 seconds before expiry
 - `search_patent` — CQL query built dynamically from any combination of title, applicant, publication number, application number, and a publication date range
@@ -22,6 +24,16 @@ Implemented:
 - Reusable XML helper for attribute-filtered list extraction; `get_applicants` now delegates to the generalised parser
 - Paginated `search_patent` results: 25 records per page via `X-OPS-Range`, with total result count, theoretical page count, accessible page count, and explicit truncation metadata for the OPS 2,000-record retrieval limit
 - Final-response evaluation: static checks for stable known answers plus dynamic checks against the actual `search_patent` output, including every returned publication number, pagination metadata, and the OPS retrieval-limit notice when applicable
+
+### Productionization after v1.0
+
+- FastAPI HTTP interface with `POST /chat` and a simple `GET /` health endpoint
+- Pydantic request and response models for the chat API
+- Automatic OpenAPI / Swagger UI documentation
+- FastAPI lifespan initialization for SQLite
+- `conversation_id`-based multi-turn API conversations
+- Persistent conversation history in SQLite, surviving application restarts
+- Responses API history serialization into a JSON-safe, replayable representation before persistence
 
 ## Tools
 
@@ -49,6 +61,9 @@ All three schemas use `"strict": true`, which requires every property to be list
 - `requests`
 - `xml.etree.ElementTree` (standard library — chosen over `lxml`, since only a handful of fields are read)
 - SQLite3
+- FastAPI
+- Pydantic
+- Uvicorn
 
 ## Installation
 
@@ -99,6 +114,48 @@ python patent_agent.py --eval
 
 This executes the fixed 11-case eval set and prints separate tool-call and final-response scores.
 
+### HTTP API
+
+Start the development server:
+
+```bash
+uvicorn api:app --reload
+```
+
+Interactive OpenAPI documentation and request testing are available at:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Start a new conversation by sending a request without a `conversation_id`:
+
+```json
+{
+  "message": "Get details for publication number EP1000000"
+}
+```
+
+The response contains the agent answer and a generated conversation ID:
+
+```json
+{
+  "answer": "...",
+  "conversation_id": "..."
+}
+```
+
+To continue the same conversation, send the returned ID with the next request:
+
+```json
+{
+  "message": "When will it expire?",
+  "conversation_id": "..."
+}
+```
+
+Conversation history is persisted in SQLite and can be restored after the API process restarts.
+
 ## Evaluation
 
 The eval set contains 11 cases covering each tool individually, a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
@@ -122,14 +179,14 @@ Last verified on **2026-08-26**:
 
 The harness does not independently verify that EPO OPS data itself is correct, and it is not a legal-status validator. It checks whether the agent selected the expected tools and whether its final answer reflects the returned tool data and required caveats.
 
-## Logging
+## Logging and Conversation Persistence
 
 Every tool call is written to `agent_logs` in `logs_db.db`:
 
 | Column | Description |
 | --- | --- |
 | `id` | Autoincrement primary key |
-| `run_id` | UUID4, shared by all calls within one REPL conversation (until `N` starts a new one) or one eval case |
+| `run_id` | UUID4 used to group related tool-call log rows. In the REPL it identifies the whole conversation until `N` starts a new one; in the FastAPI layer a new `run_id` is created for each `POST /chat` request. |
 | `timestamp` | ISO 8601, local time |
 | `user_input` | The original natural-language question |
 | `tool_name` | Which tool was called |
@@ -141,25 +198,40 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 
 `run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows. Each row also carries the model's final response for that turn — even when a tool was called, so the row shows both the tool call and the text the model ultimately gave the user.
 
+API conversation state is tracked separately through `conversation_id` in the `conversations` table. `agent_logs` does not yet store `conversation_id`, so conversation-level tracing across multiple HTTP requests is not yet available.
+
+Persistent API conversation state is stored in the `conversations` table:
+
+| Column | Description |
+| --- | --- |
+| `conversation_id` | Primary key identifying one multi-turn API conversation |
+| `history` | Serialized Responses API conversation history stored as JSON text |
+| `created_at` | ISO 8601 timestamp set when the conversation is first stored |
+| `updated_at` | ISO 8601 timestamp refreshed when the conversation history is updated |
+
 ## Project Structure
 
 | File | Description |
 | --- | --- |
 | `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
-| `logs_db.py` | SQLite schema, tool-call logging, and final-response updates |
+| `api.py` | FastAPI application, request/response models, conversation handling, and history serialization |
+| `logs_db.py` | SQLite schema, tool-call logging, final-response updates, and persistent conversation storage |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
-| `logs_db.db` | SQLite log file, created on first run (not tracked in the repo) |
+| `logs_db.db` | SQLite database for agent logs and persistent conversation history, created on first run (not tracked in the repo) |
+
 
 ## Next
 
-Version 1.0 closes the core agent behavior. Further work on this repository will focus on productionization rather than expanding the patent-domain feature set:
+Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- FastAPI/API interface
+- API error handling and HTTP status mapping
 - Runtime safeguards, limits, and timeouts
+- Retry/backoff behavior for external API failures and rate limits
+- API and persistence tests
 - Docker and deployment
 - Observability for errors, latency, and token usage
-- Retry/backoff behavior for external API failures and rate limits
+- Further separation of API, agent, persistence, and domain layers
 
 ## Out of Scope
 
@@ -187,3 +259,8 @@ Other known limitations:
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
 - There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.
 - `logs_db.db` is created relative to the current working directory, so running the script from different directories produces separate log databases.
+- API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
+- Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
+- `POST /chat` creates a new `run_id` for each agent execution while `conversation_id` identifies the multi-turn conversation. `agent_logs` does not yet store `conversation_id`.
+- The API currently has no authentication, authorization, concurrency safeguards, or production deployment configuration.
+- Persisted API conversation history currently grows without trimming, summarization, expiration, or cleanup. Long-running conversations therefore increase both stored history size and the amount of context sent to the model.
