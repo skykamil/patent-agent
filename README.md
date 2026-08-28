@@ -34,6 +34,9 @@ Current development focuses on productionizing the existing agent rather than ex
 - `conversation_id`-based multi-turn API conversations
 - Persistent conversation history in SQLite, surviving application restarts
 - Responses API history serialization into a JSON-safe, replayable representation before persistence
+- Request validation with Pydantic, including rejection of empty and whitespace-only messages
+- Explicit HTTP error mapping for conversation lookup, upstream failures, rate limits, timeouts, and internal agent errors
+- Custom EPO exception hierarchy separating timeout, connection, rate-limit, and upstream failures; malformed XML is treated as an upstream failure
 
 ## Tools
 
@@ -93,7 +96,7 @@ All three schemas use `"strict": true`, which requires every property to be list
 Running the script starts an interactive REPL:
 
 ```bash
-python patent_agent.py
+python3 patent_agent.py
 ```
 
 Each prompt shows three options:
@@ -109,7 +112,7 @@ Type a natural-language question to have the agent answer it. Conversation histo
 To run the eval harness instead of the REPL:
 
 ```bash
-python patent_agent.py --eval
+python3 patent_agent.py --eval
 ```
 
 This executes the fixed 11-case eval set and prints separate tool-call and final-response scores.
@@ -156,6 +159,8 @@ To continue the same conversation, send the returned ID with the next request:
 
 Conversation history is persisted in SQLite and can be restored after the API process restarts.
 
+The API explicitly maps known failure modes to HTTP status codes: `404` for an unknown conversation, `422` for request validation, `429` for upstream rate limits, `500` for internal application failures, `502` for invalid/upstream responses, `503` for unavailable upstream services, and `504` for upstream timeouts.
+
 ## Evaluation
 
 The eval set contains 11 cases covering each tool individually, a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
@@ -172,7 +177,7 @@ For stable cases, the harness checks required response content. For `search_pate
 
 The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
 
-Last verified on **2026-08-26**:
+Last verified on **2026-08-28**:
 
 - **Tool-call eval: 11/11**
 - **Final-response eval: 11/11**
@@ -225,7 +230,6 @@ Persistent API conversation state is stored in the `conversations` table:
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- API error handling and HTTP status mapping
 - Runtime safeguards, limits, and timeouts
 - Retry/backoff behavior for external API failures and rate limits
 - API and persistence tests
@@ -249,12 +253,12 @@ Other known limitations:
 
 - `search_patent` returns publication numbers only — no titles, applicants, or dates. Enriching results requires a separate `get_patent_details` call per number, which the tool description explicitly discourages the model from doing automatically.
 - `search_patent` returns 25 records per page. OPS exposes the total hit count but allows retrieval of only the first 2,000 records from a result set, so at most 80 pages are accessible. Broader searches must be narrowed to reach records beyond that limit.
-- `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; if neither is present, parsing fails and the failure surfaces as a caught tool error rather than a result.
+- `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; malformed or unusable upstream responses may therefore surface as an API error rather than a patent result.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
 - The agent loop is hard-capped at three iterations. When the cap is hit, the loop simply stops — the user is not told the answer may be incomplete.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
-- Exception handling distinguishes network/HTTP errors and XML parsing errors from other failures via `status`, but everything else (e.g. missing/malformed data after a successful parse) still falls into the generic `error` status.
-- A throttled response (HTTP 429) is caught the same way as any other HTTP error and logged with `status="network_error"` — there is no dedicated detection, backoff, or retry logic specific to rate limiting.
+- EPO timeouts, connection failures, HTTP 429 responses, upstream 5xx responses, and malformed XML are handled explicitly and propagated to the HTTP layer. Other unexpected tool failures surface as internal server errors.
+- Rate limits are detected separately for both EPO and OpenAI, but there is not yet any retry or backoff behavior.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
 - There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.

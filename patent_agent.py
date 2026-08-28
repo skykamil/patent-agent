@@ -12,6 +12,24 @@ from logs_db import init_db, log_tool_call, update_final_response
 from openai.types.responses.function_tool_param import FunctionToolParam
 from openai.types.responses.response_input_param import ResponseInputParam, ResponseInputItemParam, FunctionCallOutput
 
+class EPOServiceError(Exception):
+    pass
+
+class EPOTimeoutError(EPOServiceError):
+    pass
+
+class EPOConnectionError(EPOServiceError):
+    pass
+
+class EPOUpstreamError(EPOServiceError):
+    pass
+
+class EPORateLimitError(EPOServiceError):
+    pass
+
+class AgentInternalError(Exception):
+    pass
+
 load_dotenv()
 
 ns = {"ex": "http://www.epo.org/exchange", "ops": "http://ops.epo.org"}
@@ -133,7 +151,6 @@ def get_filtered_values(patent, element_tag, attribute_name, attribute_value, ch
             values.append(element_name.text)
     return values
 
-
 def get_title(patent):
     title = None
     ref = patent.find(f'.//ex:bibliographic-data', ns)
@@ -230,7 +247,6 @@ def expiration_date(filing_date):
       expiration = parsed.replace(year=parsed.year + 20)
       return expiration.strftime("%Y%m%d")
 
-
 def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
     logged_ids = []
     actual_calls = []
@@ -257,18 +273,88 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
                                     patent_records = get_patent_details(**args)
                                 else:
                                     patent_records = expiration_date(**args)
-                            except requests.exceptions.RequestException as e:
-                                patent_records = {"error": f"Network error in {item.name}: {str(e)}"}
-                                status = "network_error"
-                                error_message = str(e)
+                            except requests.exceptions.Timeout as e:
+                                log_tool_call(
+                                    run_id=run_id,
+                                    user_input=user_input,
+                                    tool_name=item.name,
+                                    arguments=json.dumps(args),
+                                    tool_output=None,
+                                    status="network_error",
+                                    error_message=str(e),
+                                    final_response=None,
+                                )
+                                raise EPOTimeoutError("EPO request timed out") from e
+                            except requests.exceptions.ConnectionError as e:
+                                log_tool_call(
+                                    run_id=run_id,
+                                    user_input=user_input,
+                                    tool_name=item.name,
+                                    arguments=json.dumps(args),
+                                    tool_output=None,
+                                    status="network_error",
+                                    error_message=str(e),
+                                    final_response=None,
+                                )
+                                raise EPOConnectionError("EPO connection error") from e
+                            except requests.exceptions.HTTPError as e:
+                                status_code = e.response.status_code
+                                if status_code == 429:
+                                    log_tool_call(
+                                        run_id=run_id,
+                                        user_input=user_input,
+                                        tool_name=item.name,
+                                        arguments=json.dumps(args),
+                                        tool_output=None,
+                                        status="network_error",
+                                        error_message=str(e),
+                                        final_response=None,
+                                    )
+                                    raise EPORateLimitError("EPO rate limit exceeded") from e
+                                elif 500 <= status_code < 600:
+                                    log_tool_call(
+                                        run_id=run_id,
+                                        user_input=user_input,
+                                        tool_name=item.name,
+                                        arguments=json.dumps(args),
+                                        tool_output=None,
+                                        status="network_error",
+                                        error_message=str(e),
+                                        final_response=None,
+                                    )
+                                    raise EPOUpstreamError(f"EPO returned HTTP {status_code}") from e
+                                else:
+                                    patent_records = {"error": f"EPO returned HTTP {status_code}: {str(e)}"}
+                                    status = "network_error"
+                                    error_message = str(e)
                             except ET.ParseError as e:
-                                patent_records = {"error": f"Could not parse response for {item.name}: {str(e)}"}
-                                status = "parse_error"
-                                error_message = str(e)
-                            except Exception as e:
-                                patent_records = {"error": f"Could not complete {item.name}: {str(e)}"}
+                                log_tool_call(
+                                    run_id=run_id,
+                                    user_input=user_input,
+                                    tool_name=item.name,
+                                    arguments=json.dumps(args),
+                                    tool_output=None,
+                                    status="parse_error",
+                                    error_message=str(e),
+                                    final_response=None,
+                                )
+                                raise EPOUpstreamError("EPO returned malformed XML") from e
+                            except ValueError as e:
+                                patent_records = {"error": f"Invalid input for {item.name}: {str(e)}"}
                                 status = "error"
                                 error_message = str(e)
+                            except Exception as e:
+                                log_tool_call(
+                                    run_id=run_id,
+                                    user_input=user_input,
+                                    tool_name=item.name,
+                                    arguments=json.dumps(args),
+                                    tool_output=None,
+                                    status="error",
+                                    error_message=str(e),
+                                    final_response=None,
+                                )
+                                raise AgentInternalError(f"Could not complete {item.name}") from e
                             else:
                                 status = "success"
                                 error_message = None
