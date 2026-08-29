@@ -9,9 +9,11 @@ from contextlib import asynccontextmanager
 from logs_db import init_db, save_conversation, load_conversation
 from patent_agent import (run_agent, EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError)
 
+MAX_HISTORY_CHARS = 100_000
+
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1)
-    conversation_id: str | None = None
+    message: str = Field(min_length=1, max_length=5000)
+    conversation_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("message")
     @classmethod
@@ -85,7 +87,11 @@ def serialize_history(input_list: ResponseInputParam):
             },
             status.HTTP_500_INTERNAL_SERVER_ERROR: {
                 "model": ErrorResponse,
-                "description": "Internal server error"
+                "description": "Internal server error",
+            },
+            status.HTTP_413_CONTENT_TOO_LARGE: {
+                "model": ErrorResponse,
+                "description": "Conversation history is too large",
             },
         },
     )
@@ -100,6 +106,8 @@ def chat(request: ChatRequest):
     else:
         input_list = json.loads(history_json)
     input_list.append({"role": "user", "content": request.message})
+    if len(json.dumps(input_list)) > MAX_HISTORY_CHARS:
+        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation history is too large")
     try:
         actual_calls, tool_outputs, final_response = run_agent(input_list, run_id, request.message)
     except EPOTimeoutError:

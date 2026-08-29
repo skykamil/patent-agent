@@ -1,6 +1,6 @@
 # Patent Research Agent
 
-A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite logging of every tool call, and an eval harness that checks both tool-call behavior and the agent's final response.
+A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite tool-call logging, and an eval harness that checks both tool-call behavior and the agent's final response.
 
 ## Status
 
@@ -37,6 +37,10 @@ Current development focuses on productionizing the existing agent rather than ex
 - Request validation with Pydantic, including rejection of empty and whitespace-only messages
 - Explicit HTTP error mapping for conversation lookup, upstream failures, rate limits, timeouts, and internal agent errors
 - Custom EPO exception hierarchy separating timeout, connection, rate-limit, and upstream failures; malformed XML is treated as an upstream failure
+- Explicit EPO request timeouts and a 60-second OpenAI request timeout, with automatic OpenAI SDK retries disabled
+- Hard runtime limits of three agent iterations and five tool calls per request
+- Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
+- Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
 
 ## Tools
 
@@ -159,11 +163,13 @@ To continue the same conversation, send the returned ID with the next request:
 
 Conversation history is persisted in SQLite and can be restored after the API process restarts.
 
-The API explicitly maps known failure modes to HTTP status codes: `404` for an unknown conversation, `422` for request validation, `429` for upstream rate limits, `500` for internal application failures, `502` for invalid/upstream responses, `503` for unavailable upstream services, and `504` for upstream timeouts.
+The API returns HTTP status codes for known failure modes: `404` for an unknown conversation, `413` for oversized conversation history, `422` for request validation, `429` for upstream rate limits, `500` for internal application failures, `502` for invalid/upstream responses, `503` for unavailable upstream services, and `504` for upstream timeouts.
+
+`POST /chat` accepts messages up to 5,000 characters and conversation IDs up to 64 characters. Before each agent run, serialized conversation history plus the new user message is capped at 100,000 characters.
 
 ## Evaluation
 
-The eval set contains 11 cases covering each tool individually, a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
+The eval set contains 11 cases covering all three tools, including a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
 
 ### Tool-call evaluation
 
@@ -177,7 +183,7 @@ For stable cases, the harness checks required response content. For `search_pate
 
 The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
 
-Last verified on **2026-08-28**:
+Last verified on **2026-08-29**:
 
 - **Tool-call eval: 11/11**
 - **Final-response eval: 11/11**
@@ -186,7 +192,7 @@ The harness does not independently verify that EPO OPS data itself is correct, a
 
 ## Logging and Conversation Persistence
 
-Every tool call is written to `agent_logs` in `logs_db.db`:
+Tool-call execution is logged to `agent_logs` in `logs_db.db`:
 
 | Column | Description |
 | --- | --- |
@@ -199,9 +205,9 @@ Every tool call is written to `agent_logs` in `logs_db.db`:
 | `tool_output` | What the tool returned, as a JSON string |
 | `status` | `success`, `network_error`, `parse_error`, `error`, or `no_tool_call` |
 | `error_message` | Exception text, `NULL` on success |
-| `final_response` | The model's final text answer for that turn, as a plain string |
+| `final_response` | The model's final text answer for completed turns; `NULL` if execution failed before a final response was produced |
 
-`run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows. Each row also carries the model's final response for that turn — even when a tool was called, so the row shows both the tool call and the text the model ultimately gave the user.
+`run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows. For completed tool calls, the row is updated with the model's final response for that turn, so it shows both the tool call and the text the model ultimately gave the user. Rows logged immediately before a propagated failure can retain a `NULL` `final_response`.
 
 API conversation state is tracked separately through `conversation_id` in the `conversations` table. `agent_logs` does not yet store `conversation_id`, so conversation-level tracing across multiple HTTP requests is not yet available.
 
@@ -230,7 +236,6 @@ Persistent API conversation state is stored in the `conversations` table:
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- Runtime safeguards, limits, and timeouts
 - Retry/backoff behavior for external API failures and rate limits
 - API and persistence tests
 - Docker and deployment
@@ -255,7 +260,7 @@ Other known limitations:
 - `search_patent` returns 25 records per page. OPS exposes the total hit count but allows retrieval of only the first 2,000 records from a result set, so at most 80 pages are accessible. Broader searches must be narrowed to reach records beyond that limit.
 - `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; malformed or unusable upstream responses may therefore surface as an API error rather than a patent result.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
-- The agent loop is hard-capped at three iterations. When the cap is hit, the loop simply stops — the user is not told the answer may be incomplete.
+- The agent is hard-capped at three model/tool iterations and five tool calls per request. Exceeding either limit raises an internal runtime-limit error instead of returning a potentially incomplete answer.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
 - EPO timeouts, connection failures, HTTP 429 responses, upstream 5xx responses, and malformed XML are handled explicitly and propagated to the HTTP layer. Other unexpected tool failures surface as internal server errors.
 - Rate limits are detected separately for both EPO and OpenAI, but there is not yet any retry or backoff behavior.
@@ -267,4 +272,4 @@ Other known limitations:
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
 - `POST /chat` creates a new `run_id` for each agent execution while `conversation_id` identifies the multi-turn conversation. `agent_logs` does not yet store `conversation_id`.
 - The API currently has no authentication, authorization, concurrency safeguards, or production deployment configuration.
-- Persisted API conversation history currently grows without trimming, summarization, expiration, or cleanup. Long-running conversations therefore increase both stored history size and the amount of context sent to the model.
+- Persisted API conversation history is not trimmed, summarized, expired, or automatically cleaned up. However, before an agent run, serialized history plus the new message is capped at 100,000 characters; requests exceeding that limit are rejected with HTTP 413.

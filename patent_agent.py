@@ -30,14 +30,21 @@ class EPORateLimitError(EPOServiceError):
 class AgentInternalError(Exception):
     pass
 
+class AgentRuntimeLimitError(AgentInternalError):
+    pass
+
 load_dotenv()
 
 ns = {"ex": "http://www.epo.org/exchange", "ops": "http://ops.epo.org"}
 
 epo_token = None
 epo_token_expiry = None
+EPO_TIMEOUT = (3.05, 10)
+OPENAI_TIMEOUT = 60.0
+MAX_AGENT_ITERATIONS = 3
+MAX_TOOL_CALLS = 5
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=OPENAI_TIMEOUT, max_retries=0)
 
 tools: list[FunctionToolParam] = [
     {
@@ -121,26 +128,61 @@ def get_epo_access_token():
     global epo_token, epo_token_expiry
     consumer_key = os.getenv("EPO_CONSUMER_KEY")
     secret_consumer = os.getenv("EPO_CONSUMER_SECRET")
-    assert consumer_key is not None, "Missing EPO_CONSUMER_KEY in .env"
-    assert secret_consumer is not None, "Missing EPO_CONSUMER_SECRET in .env"
+    if consumer_key is None:
+        raise AgentInternalError("Missing EPO_CONSUMER_KEY in .env")
+    if secret_consumer is None:
+        raise AgentInternalError("Missing EPO_CONSUMER_SECRET in .env")
     if epo_token is not None and epo_token_expiry is not None and datetime.now() < epo_token_expiry:
         return epo_token
     else:
-        r = requests.post('https://ops.epo.org/3.2/auth/accesstoken', auth=(consumer_key, secret_consumer), data={'grant_type': 'client_credentials'})
-        r.raise_for_status()
-        data = r.json()
-        epo_token = data["access_token"]
+        r = requests.post('https://ops.epo.org/3.2/auth/accesstoken', auth=(consumer_key, secret_consumer), data={'grant_type': 'client_credentials'}, timeout=EPO_TIMEOUT)
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code in (401, 403):
+                raise EPOUpstreamError("EPO authentication failed") from e
+            if e.response.status_code == 429:
+                raise EPORateLimitError("EPO rate limit exceeded") from e
+            if  400 <= e.response.status_code < 500:
+                raise EPOUpstreamError("EPO token request failed") from e
+            raise
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise EPOUpstreamError("EPO token response contains invalid JSON") from e
+        if not isinstance(data, dict):
+            raise EPOUpstreamError("EPO token response has invalid structure")
+        try:
+            epo_token = data["access_token"]
+        except KeyError as e:
+            raise EPOUpstreamError("EPO token response is missing access_token") from e
+        if not isinstance(epo_token, str) or epo_token.strip() == "":
+            raise EPOUpstreamError("EPO token response contains invalid access_token")
         now = datetime.now()
-        epo_token_expiry = now + timedelta(seconds=int(data["expires_in"])-30)
+        try:
+            expires_in = data["expires_in"]
+            expires_in = int(expires_in)
+        except KeyError as e:
+            raise EPOUpstreamError("EPO token response is missing expires_in") from e
+        except (ValueError, TypeError) as e:
+            raise EPOUpstreamError("EPO token response contains invalid expires_in") from e
+        epo_token_expiry = now + timedelta(seconds=expires_in-30)
         return epo_token
 
 def get_epodoc_value(patent, container, child_tag):
     ref = patent.find(f'.//ex:{container}', ns)
+    if ref is None:
+        raise EPOUpstreamError(f"EPO response is missing {container}")
     doc_ids = ref.findall('ex:document-id', ns)
     for doc_id in doc_ids:
         if doc_id.get("document-id-type") == "epodoc":
             number = doc_id.find(f'ex:{child_tag}', ns)
+            if number is None:
+                raise EPOUpstreamError(f"EPO response is missing {child_tag}")
+            if number.text is None:
+                raise EPOUpstreamError(f"EPO response contains empty {child_tag}")
             return number.text
+    raise EPOUpstreamError("No epodoc document-id found in EPO response")
 
 def get_filtered_values(patent, element_tag, attribute_name, attribute_value, child_tag):
     matching_elements = patent.findall(f'.//ex:{element_tag}', ns)
@@ -148,22 +190,44 @@ def get_filtered_values(patent, element_tag, attribute_name, attribute_value, ch
     for element in matching_elements:
         if element.get(attribute_name) == attribute_value:
             element_name = element.find(f'.//ex:{child_tag}', ns)
+            if element_name is None:
+                raise EPOUpstreamError(f"EPO response is missing {child_tag}")
+            if element_name.text is None:
+                raise EPOUpstreamError(f"EPO response contains empty {child_tag}")
             values.append(element_name.text)
     return values
 
 def get_title(patent):
     title = None
     ref = patent.find(f'.//ex:bibliographic-data', ns)
+    if ref is None:
+        raise EPOUpstreamError("EPO response is missing bibliographic-data")
     titles = ref.findall('ex:invention-title', ns)
     for case in titles:
         if case.get("lang") == "en":
             title = case.text
+    if title is None:
+        raise EPOUpstreamError("EPO response does not contain an English invention title")
     return title
 
 def get_applicants(patent):
     return get_filtered_values(patent, 'applicant', 'data-format', 'epodoc', 'name')
 
 def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, page=None):
+    if any(value is not None and not isinstance(value, str) for value in [ti, pa, pn, ap, pd_from, pd_to]):
+        raise ValueError("ti, pa, pn, ap, pd_from and pd_to must be strings or None")
+    if all(value is None or value.strip() == "" for value in [ti, pa, pn, ap, pd_from, pd_to]):
+        raise ValueError("At least one search criterion is required")
+    for name, value in [("pd_from", pd_from), ("pd_to", pd_to)]:
+        if value is not None:
+            try:
+                datetime.strptime(value, "%Y%m%d")
+            except ValueError as e:
+                raise ValueError(f"{name} must be a valid date in YYYYMMDD format") from e
+    if (pd_from is not None and pd_to is not None) and (datetime.strptime(pd_from, "%Y%m%d") > datetime.strptime(pd_to, "%Y%m%d")):
+        raise ValueError(f"pd_from ({pd_from}) cannot be after pd_to ({pd_to})")
+    if page is not None and not isinstance(page, int):
+        raise ValueError("Page must be an integer or None")
     if page is None:
         page = 1
     if page < 1 or page > 80:
@@ -187,14 +251,19 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, 
         if value is not None:
             query.append(f'{name}="{value}"')
     query_string = " and ".join(query)
-    r = requests.get("https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string})
+    r = requests.get("https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string}, timeout=EPO_TIMEOUT)
     r.raise_for_status()
     root = ET.fromstring(r.text)
     search_info = root.find('.//ops:biblio-search', ns)
-    assert search_info is not None, "Missing biblio-search"
+    if search_info is None:
+        raise EPOUpstreamError("EPO response is missing biblio-search")
     result_count = search_info.get("total-result-count")
-    assert result_count is not None, "Missing total-result-count"
-    result_count = int(result_count)
+    if result_count is None:
+        raise EPOUpstreamError("EPO response is missing total-result-count")
+    try:
+        result_count = int(result_count)
+    except ValueError as e:
+        raise EPOUpstreamError("EPO response contains invalid total-result-count") from e
     total_pages = (result_count + 24) // 25
     available_pages = min(total_pages, 80)
     truncated = result_count > 2000
@@ -204,12 +273,10 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, 
         country = result.find('.//ex:country', ns)
         number = result.find('.//ex:doc-number', ns)
         kind = result.find('.//ex:kind', ns)
-        assert country is not None, "Missing country"
-        assert number is not None, "Missing number"
-        assert kind is not None, "Missing kind"
-        assert country.text is not None, "Missing country"
-        assert number.text is not None, "Missing number"
-        assert kind.text is not None, "Missing kind"
+        if country is None or number is None or kind is None:
+            raise EPOUpstreamError("EPO response contains incomplete publication reference")
+        if country.text is None or number.text is None or kind.text is None:
+            raise EPOUpstreamError("EPO response contains empty publication reference field")
         publications.append(country.text + number.text + kind.text)
     return {
         "results": publications,
@@ -221,10 +288,14 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, 
     }
 
 def get_patent_details(pn):
+    if pn is not None and not isinstance(pn, str):
+        raise ValueError("Publication number must be a string or None")
+    if pn is None or pn.strip() == "":
+        raise ValueError("Publication number cannot be empty")
     details = {}
     token = get_epo_access_token()
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{pn}/biblio", headers=headers)
+    r = requests.get(f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{pn}/biblio", headers=headers, timeout=EPO_TIMEOUT)
     r.raise_for_status()
     root = ET.fromstring(r.text)
     documents = root.findall('.//ex:exchange-document', ns)
@@ -236,6 +307,8 @@ def get_patent_details(pn):
         for doc in documents:
             if doc.get("kind") == "A1":
                 patent = doc
+    if patent is None:
+        raise EPOUpstreamError("EPO response did not contain B1 or A1 publication data")
     details["publication_number"] = get_epodoc_value(patent, "publication-reference", "doc-number")
     details["filing_date"] = get_epodoc_value(patent, "application-reference", "date")
     details["title"] = get_title(patent)
@@ -243,14 +316,19 @@ def get_patent_details(pn):
     return details
 
 def expiration_date(filing_date):
-      parsed = datetime.strptime(filing_date, "%Y%m%d")
-      expiration = parsed.replace(year=parsed.year + 20)
-      return expiration.strftime("%Y%m%d")
+    if not isinstance(filing_date, str):
+        raise ValueError("Filing date must be a string")
+    if filing_date.strip() == "":
+        raise ValueError("Filing date cannot be empty")
+    parsed = datetime.strptime(filing_date, "%Y%m%d")
+    expiration = parsed.replace(year=parsed.year + 20)
+    return expiration.strftime("%Y%m%d")
 
 def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
     logged_ids = []
     actual_calls = []
     tool_outputs = []
+    tool_call_count = 0
     response = client.responses.create(
             model="gpt-5.6-luna",
             tools=tools,
@@ -260,11 +338,14 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
     for item in response.output:
         input_list.append(cast(ResponseInputItemParam, item))
     i=0
-    while any(item.type == "function_call" for item in response.output) and i < 3:
+    while any(item.type == "function_call" for item in response.output) and i < MAX_AGENT_ITERATIONS:
         for item in response.output:
                 item.model_dump()
                 if item.type == "function_call":
                         if item.name in ["search_patent", "get_patent_details", "expiration_date"]:
+                            tool_call_count += 1
+                            if tool_call_count > MAX_TOOL_CALLS:
+                                raise AgentRuntimeLimitError("Agent reached maximum tool call limit")
                             args = json.loads(item.arguments)
                             try:
                                 if item.name == "search_patent":
@@ -299,6 +380,8 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
                                 raise EPOConnectionError("EPO connection error") from e
                             except requests.exceptions.HTTPError as e:
                                 status_code = e.response.status_code
+                                if status_code in [401, 403]:
+                                    raise EPOUpstreamError("EPO authentication failed") from e
                                 if status_code == 429:
                                     log_tool_call(
                                         run_id=run_id,
@@ -343,6 +426,8 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
                                 patent_records = {"error": f"Invalid input for {item.name}: {str(e)}"}
                                 status = "error"
                                 error_message = str(e)
+                            except EPOServiceError:
+                                raise
                             except Exception as e:
                                 log_tool_call(
                                     run_id=run_id,
@@ -376,6 +461,8 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
         for item in response.output:
             input_list.append(cast(ResponseInputItemParam, item))
         i += 1
+    if any(item.type == "function_call" for item in response.output):
+        raise AgentRuntimeLimitError("Agent reached maximum iteration limit")
     final_response = response.output_text
     print(final_response)
     for log_id in logged_ids:
