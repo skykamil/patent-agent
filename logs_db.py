@@ -1,8 +1,11 @@
+import os
 import sqlite3
 from datetime import datetime
 
+DATABASE_PATH = os.getenv("DATABASE_PATH", "logs_db.db")
+
 def get_connection():
-    con = sqlite3.connect("logs_db.db")
+    con = sqlite3.connect(DATABASE_PATH)
     return con
 
 def init_db():

@@ -6,7 +6,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 **Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. The first productionization layer adds a FastAPI HTTP interface and persistent multi-turn conversation state in SQLite.
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, and Docker containerization.
 
 ### Core v1.0
 
@@ -41,6 +41,7 @@ Current development focuses on productionizing the existing agent rather than ex
 - Hard runtime limits of three agent iterations and five tool calls per request
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
 - Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
+- Docker containerization with a slim Python image, `.dockerignore`, runtime environment variables, and SQLite persistence through a named volume
 
 ## Tools
 
@@ -59,6 +60,7 @@ All three schemas use `"strict": true`, which requires every property to be list
 - Python 3.12+ (tested on 3.14)
 - OpenAI API key
 - EPO OPS consumer key and secret (free registration at the [EPO developer portal](https://developers.epo.org/))
+- Docker Desktop or Docker Engine (for containerized usage)
 
 ## Tech Stack
 
@@ -71,6 +73,7 @@ All three schemas use `"strict": true`, which requires every property to be list
 - FastAPI
 - Pydantic
 - Uvicorn
+- Docker
 
 ## Installation
 
@@ -167,6 +170,28 @@ The API returns HTTP status codes for known failure modes: `404` for an unknown 
 
 `POST /chat` accepts messages up to 5,000 characters and conversation IDs up to 64 characters. Before each agent run, serialized conversation history plus the new user message is capped at 100,000 characters.
 
+### Docker
+
+Build the image:
+
+```bash
+docker build -t patent-agent .
+```
+
+Create a named volume for persistent SQLite data:
+
+```bash
+docker volume create patent-agent-data
+```
+
+Run the API container with runtime credentials and persistent SQLite storage:
+
+```bash
+docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/logs_db.db --mount type=volume,src=patent-agent-data,dst=/data -p 8000:8000 patent-agent
+```
+
+The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history and tool logs survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
+
 ## Evaluation
 
 The eval set contains 11 cases covering all three tools, including a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
@@ -183,7 +208,7 @@ For stable cases, the harness checks required response content. For `search_pate
 
 The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
 
-Last verified on **2026-08-29**:
+Last verified on **2026-08-30**:
 
 - **Tool-call eval: 11/11**
 - **Final-response eval: 11/11**
@@ -192,7 +217,7 @@ The harness does not independently verify that EPO OPS data itself is correct, a
 
 ## Logging and Conversation Persistence
 
-Tool-call execution is logged to `agent_logs` in `logs_db.db`:
+Tool-call execution is logged to `agent_logs` in the SQLite database configured by `DATABASE_PATH`. If `DATABASE_PATH` is not set, the application defaults to `logs_db.db` in the current working directory:
 
 | Column | Description |
 | --- | --- |
@@ -228,18 +253,19 @@ Persistent API conversation state is stored in the `conversations` table:
 | `api.py` | FastAPI application, request/response models, conversation handling, and history serialization |
 | `logs_db.py` | SQLite schema, tool-call logging, final-response updates, and persistent conversation storage |
 | `requirements.txt` | Python dependencies |
+| `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn |
+| `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
-| `logs_db.db` | SQLite database for agent logs and persistent conversation history, created on first run (not tracked in the repo) |
-
+| `logs_db.db` | Default local SQLite database for agent logs and persistent conversation history; the path can be overridden with `DATABASE_PATH` |
 
 ## Next
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
+- Deployment
+- Observability for errors, latency, and token usage
 - Retry/backoff behavior for external API failures and rate limits
 - API and persistence tests
-- Docker and deployment
-- Observability for errors, latency, and token usage
 - Further separation of API, agent, persistence, and domain layers
 
 ## Out of Scope
@@ -267,7 +293,7 @@ Other known limitations:
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
 - There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.
-- `logs_db.db` is created relative to the current working directory, so running the script from different directories produces separate log databases.
+- The SQLite database path defaults to `logs_db.db` in the current working directory, but can be overridden with the `DATABASE_PATH` environment variable. Docker uses this to store the database at `/data/logs_db.db` on a named volume.
 - API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
 - `POST /chat` creates a new `run_id` for each agent execution while `conversation_id` identifies the multi-turn conversation. `agent_logs` does not yet store `conversation_id`.
