@@ -40,6 +40,8 @@ Current development focuses on productionizing the existing agent rather than ex
 - Explicit EPO request timeouts and a 60-second OpenAI request timeout, with automatic OpenAI SDK retries disabled
 - Hard runtime limits of three agent iterations and five tool calls per request
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
+- Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
+- Persistent global daily request cap for `POST /chat`: up to 50 requests per day may reach agent execution; the counter is incremented atomically in SQLite immediately before `run_agent()` and resets at midnight in `Europe/Warsaw`
 - Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
 - Docker containerization with a slim Python image, `.dockerignore`, runtime environment variables, and SQLite persistence through a named volume
 
@@ -166,9 +168,11 @@ To continue the same conversation, send the returned ID with the next request:
 
 Conversation history is persisted in SQLite and can be restored after the API process restarts.
 
-The API returns HTTP status codes for known failure modes: `404` for an unknown conversation, `413` for oversized conversation history, `422` for request validation, `429` for upstream rate limits, `500` for internal application failures, `502` for invalid/upstream responses, `503` for unavailable upstream services, and `504` for upstream timeouts.
+The API returns HTTP status codes for known failure modes: `404` for an unknown conversation, `413` for oversized conversation history, `422` for request validation, `429` for local or upstream rate limits, `500` for internal application failures, `502` for invalid/upstream responses, `503` for unavailable upstream services, and `504` for upstream timeouts.
 
 `POST /chat` accepts messages up to 5,000 characters and conversation IDs up to 64 characters. Before each agent run, serialized conversation history plus the new user message is capped at 100,000 characters.
+
+`POST /chat` is additionally protected by a per-IP limit of 10 requests per 10-minute sliding window and a persistent global limit of 50 requests per day that may reach agent execution. The per-IP counter is process-local and is checked near the start of the route. The daily counter is stored in SQLite, incremented immediately before `run_agent()`, and resets at midnight in the `Europe/Warsaw` timezone. Requests admitted to agent execution consume one daily slot even if the agent run later fails, including because of an upstream error.
 
 ### Docker
 
@@ -187,10 +191,12 @@ docker volume create patent-agent-data
 Run the API container with runtime credentials and persistent SQLite storage:
 
 ```bash
-docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/logs_db.db --mount type=volume,src=patent-agent-data,dst=/data -p 8000:8000 patent-agent
+docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/logs_db.db --mount type=volume,src=patent-agent-data,dst=/data -p 127.0.0.1:8000:8000 patent-agent
 ```
 
-The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history and tool logs survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
+The API port is bound to `127.0.0.1` on the host rather than exposed on all interfaces; public HTTPS reverse-proxy configuration is not yet part of this checkpoint.
+
+The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
 
 ## Evaluation
 
@@ -215,7 +221,7 @@ Last verified on **2026-08-30**:
 
 The harness does not independently verify that EPO OPS data itself is correct, and it is not a legal-status validator. It checks whether the agent selected the expected tools and whether its final answer reflects the returned tool data and required caveats.
 
-## Logging and Conversation Persistence
+## Logging, Conversation Persistence, and Usage Limits
 
 Tool-call execution is logged to `agent_logs` in the SQLite database configured by `DATABASE_PATH`. If `DATABASE_PATH` is not set, the application defaults to `logs_db.db` in the current working directory:
 
@@ -245,18 +251,28 @@ Persistent API conversation state is stored in the `conversations` table:
 | `created_at` | ISO 8601 timestamp set when the conversation is first stored |
 | `updated_at` | ISO 8601 timestamp refreshed when the conversation history is updated |
 
+Daily API usage is tracked separately in the `daily_usage` table:
+
+| Column | Description |
+| --- | --- |
+| `day` | Calendar day in `YYYY-MM-DD` format, calculated using the `Europe/Warsaw` timezone |
+| `request_count` | Number of daily agent-execution slots successfully consumed on that day |
+
+The daily counter is updated using a single atomic SQLite UPSERT. If the current count is below the configured limit, the row is inserted or incremented and the request is allowed to continue. Once the limit is reached, SQLite leaves the row unchanged and the API returns HTTP `429`. Because the counter is stored in the same persistent SQLite database as conversations and tool logs, it survives application and container restarts.
+
+
 ## Project Structure
 
 | File | Description |
 | --- | --- |
 | `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
-| `api.py` | FastAPI application, request/response models, conversation handling, and history serialization |
-| `logs_db.py` | SQLite schema, tool-call logging, final-response updates, and persistent conversation storage |
+| `api.py` | FastAPI application, request/response models, conversation handling, rate limiting, daily usage enforcement, and history serialization |
+| `logs_db.py` | SQLite schema, tool-call logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
 | `requirements.txt` | Python dependencies |
 | `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn |
 | `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
-| `logs_db.db` | Default local SQLite database for agent logs and persistent conversation history; the path can be overridden with `DATABASE_PATH` |
+| `logs_db.db` | Default local SQLite database for agent logs, persistent conversation history, and daily usage counters; the path can be overridden with `DATABASE_PATH` |
 
 ## Next
 
@@ -297,5 +313,7 @@ Other known limitations:
 - API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
 - `POST /chat` creates a new `run_id` for each agent execution while `conversation_id` identifies the multi-turn conversation. `agent_logs` does not yet store `conversation_id`.
-- The API currently has no authentication, authorization, concurrency safeguards, or production deployment configuration.
+- The API currently has no authentication or authorization. Abuse protection consists of a per-IP request limiter and a persistent global daily request cap; it is not a user/account-level quota or identity system.
+- The per-IP limiter is a best-effort, process-local safeguard stored only in application memory. It resets when the process or container restarts, is not shared across multiple application workers or instances, and is not synchronized across concurrent requests. The global daily cap is enforced atomically in SQLite and survives restarts and container recreation as long as the persistent database volume is retained.
+- Public HTTPS reverse-proxy configuration and the final production deployment setup are still in progress. FastAPI is currently intended to be bound only to `127.0.0.1` on the host rather than exposed directly to the Internet.
 - Persisted API conversation history is not trimmed, summarized, expired, or automatically cleaned up. However, before an agent run, serialized history plus the new message is capped at 100,000 characters; requests exceeding that limit are rejected with HTTP 413.

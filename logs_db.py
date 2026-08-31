@@ -33,8 +33,30 @@ def init_db():
             updated_at TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_usage(
+            day TEXT PRIMARY KEY,
+            request_count INTEGER NOT NULL
+        )
+    """)
     con.commit()
     con.close()
+
+def try_increment_daily_usage(day: str, limit: int) -> bool:
+    con = get_connection()
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO daily_usage (day, request_count) VALUES (?, 1)
+        ON CONFLICT (day) DO UPDATE SET
+            request_count=request_count+1
+            WHERE request_count < ?
+        """,
+        (day, limit)
+    )
+    incremented = cur.rowcount == 1
+    con.commit()
+    con.close()
+    return incremented
 
 def save_conversation(conversation_id, history):
     con = get_connection()
@@ -56,9 +78,7 @@ def save_conversation(conversation_id, history):
 def load_conversation(conversation_id):
     con = get_connection()
     cur = con.cursor()
-    cur.execute(
-        "SELECT history FROM conversations WHERE conversation_id = ?", (conversation_id,)
-    )
+    cur.execute("SELECT history FROM conversations WHERE conversation_id = ?", (conversation_id,))
     row = cur.fetchone()
     con.close()
     if row is None:
@@ -69,8 +89,7 @@ def log_tool_call(run_id, user_input, tool_name, arguments, tool_output, status,
     con = get_connection()
     cur = con.cursor()
     timestamp = datetime.now().isoformat()
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO agent_logs (run_id, timestamp, user_input, tool_name, arguments, tool_output, status, error_message, final_response)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
