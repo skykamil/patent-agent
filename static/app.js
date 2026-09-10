@@ -12,13 +12,17 @@ function renderMarkdown(text, container) {
     let currentList = null;
 
     function addFormattedText(element, value) {
-        const parts = value.split(/(\*\*.*?\*\*)/g);
+        const parts = value.split(/(\*\*.*?\*\*|\*[^*]+?\*)/g);
 
         for (const part of parts) {
             if (part.startsWith("**") && part.endsWith("**")) {
                 const strong = document.createElement("strong");
                 strong.textContent = part.slice(2, -2);
                 element.appendChild(strong);
+            } else if (part.startsWith("*") && part.endsWith("*")) {
+                const emphasis = document.createElement("em");
+                emphasis.textContent = part.slice(1, -1);
+                element.appendChild(emphasis);
             } else {
                 element.appendChild(document.createTextNode(part));
             }
@@ -30,6 +34,16 @@ function renderMarkdown(text, container) {
 
         if (!trimmedLine) {
             currentList = null;
+            continue;
+        }
+
+        if (trimmedLine.startsWith("## ")) {
+            currentList = null;
+
+            const heading = document.createElement("h2");
+            addFormattedText(heading, trimmedLine.slice(3));
+            container.appendChild(heading);
+
             continue;
         }
 

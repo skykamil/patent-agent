@@ -6,7 +6,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 **Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, Docker containerization, an automated EC2 deployment script, and a lightweight browser chat frontend served directly by FastAPI. Public HTTPS reverse-proxy configuration is still in progress.
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
 
 ### Core v1.0
 
@@ -28,7 +28,7 @@ Current development focuses on productionizing the existing agent rather than ex
 ### Productionization after v1.0
 
 - FastAPI HTTP interface with `POST /chat`, a browser frontend on `GET /`, and a dedicated `GET /health` health endpoint
-- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text and ordered/unordered lists
+- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text, italic text, level-two headings, and ordered/unordered lists
 - Pydantic request and response models for the chat API
 - Automatic OpenAPI / Swagger UI documentation
 - FastAPI lifespan initialization for SQLite
@@ -46,6 +46,7 @@ Current development focuses on productionizing the existing agent rather than ex
 - Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
 - Docker containerization with a slim Python image, `.dockerignore`, runtime environment variables, and SQLite persistence through a named volume
 - Automated AWS EC2 deployment via `scripts/deploy.sh`, with application secrets loaded from SSM Parameter Store, persistent SQLite storage under `/data`, and the API port published only on host `127.0.0.1:8000`
+- Public HTTPS via Caddy reverse proxy, with automatic TLS certificates from Let's Encrypt and HTTP-to-HTTPS redirects
 
 ## Tools
 
@@ -209,7 +210,7 @@ Run the API container with runtime credentials and persistent SQLite storage:
 docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/logs_db.db --mount type=volume,src=patent-agent-data,dst=/data -p 127.0.0.1:8000:8000 patent-agent
 ```
 
-The API port is bound to `127.0.0.1` on the host rather than exposed on all interfaces; public HTTPS reverse-proxy configuration is not yet part of this checkpoint.
+The API port is bound to `127.0.0.1` on the host rather than exposed directly to the Internet. Public traffic is handled by Caddy on ports 80 and 443 and reverse-proxied to FastAPI on `127.0.0.1:8000`.
 
 The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
 
@@ -287,6 +288,8 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `static/styles.css` | Chat layout, message styling, composer, and working indicator |
 | `static/app.js` | Browser-side chat behavior, API requests, conversation state, Markdown rendering, keyboard handling, and auto-scroll |
 | `scripts/deploy.sh` | Automated EC2 deployment script |
+| `deploy/caddy/Caddyfile` | Caddy reverse-proxy configuration for public HTTPS |
+| `deploy/systemd/caddy.service` | systemd service definition for running Caddy on EC2 |
 | `requirements.txt` | Python dependencies |
 | `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn |
 | `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context |
@@ -297,7 +300,6 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- Public HTTPS reverse proxy and final public deployment setup
 - Observability for errors, latency, and token usage
 - Retry/backoff behavior for external API failures and rate limits
 - API and persistence tests
@@ -319,7 +321,7 @@ Other known limitations:
 
 - `search_patent` returns publication numbers only — no titles, applicants, or dates. Enriching results requires a separate `get_patent_details` call per number, which the tool description explicitly discourages the model from doing automatically.
 - `search_patent` returns 25 records per page. OPS exposes the total hit count but allows retrieval of only the first 2,000 records from a result set, so at most 80 pages are accessible. Broader searches must be narrowed to reach records beyond that limit.
-- `get_patent_details` normalizes publication-number input before the EPODOC lookup. If the input includes a publication kind code, the matching returned publication is selected; if no kind code is supplied, the latest returned publication is selected by publication date.
+- `get_patent_details` currently accepts publication numbers consisting of a two-letter country code, a numeric publication number, and an optional kind code of one letter with an optional digit. Other publication-number formats are rejected as unsupported.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
 - The agent is hard-capped at three model/tool iterations and 30 tool calls per request. Exceeding either limit raises an internal runtime-limit error instead of returning a potentially incomplete answer.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
@@ -328,11 +330,9 @@ Other known limitations:
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
 - There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.
-- The SQLite database path defaults to `logs_db.db` in the current working directory, but can be overridden with the `DATABASE_PATH` environment variable. Docker uses this to store the database at `/data/logs_db.db` on a named volume.
 - API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
 - `POST /chat` creates a new `run_id` for each agent execution while `conversation_id` identifies the multi-turn conversation. `agent_logs` does not yet store `conversation_id`.
 - The API currently has no authentication or authorization. Abuse protection consists of a per-IP request limiter and a persistent global daily request cap; it is not a user/account-level quota or identity system.
 - The per-IP limiter is a best-effort, process-local safeguard stored only in application memory. It resets when the process or container restarts, is not shared across multiple application workers or instances, and is not synchronized across concurrent requests. The global daily cap is enforced atomically in SQLite and survives restarts and container recreation as long as the persistent database volume is retained.
-- Public HTTPS reverse-proxy configuration and the final production deployment setup are still in progress. FastAPI is currently intended to be bound only to `127.0.0.1` on the host rather than exposed directly to the Internet.
 - Persisted API conversation history is not trimmed, summarized, expired, or automatically cleaned up. However, before an agent run, serialized history plus the new message is capped at 100,000 characters; requests exceeding that limit are rejected with HTTP 413.
