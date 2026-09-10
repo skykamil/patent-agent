@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import uuid
 import json
@@ -42,7 +43,7 @@ epo_token_expiry = None
 EPO_TIMEOUT = (3.05, 10)
 OPENAI_TIMEOUT = 60.0
 MAX_AGENT_ITERATIONS = 3
-MAX_TOOL_CALLS = 5
+MAX_TOOL_CALLS = 30
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=OPENAI_TIMEOUT, max_retries=0)
 
@@ -292,23 +293,34 @@ def get_patent_details(pn):
         raise ValueError("Publication number must be a string or None")
     if pn is None or pn.strip() == "":
         raise ValueError("Publication number cannot be empty")
+    normalized_pn = re.sub(r"[\s.\-_/]", "", pn.upper())
+    match = re.fullmatch(r"([A-Z]{2})(\d+)([A-Z]\d?)?", normalized_pn)
+    if match is None:
+        raise ValueError("Unsupported publication number format")
+    country, number, kind = match.groups()
+    epodoc_pn = f"{country}{number}"
     details = {}
     token = get_epo_access_token()
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{pn}/biblio", headers=headers, timeout=EPO_TIMEOUT)
+    r = requests.get(f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{epodoc_pn}/biblio", headers=headers, timeout=EPO_TIMEOUT)
     r.raise_for_status()
     root = ET.fromstring(r.text)
     documents = root.findall('.//ex:exchange-document', ns)
     patent = None
-    for doc in documents:
-        if doc.get("kind") == "B1":
-            patent = doc
-    if patent is None:
+    if kind is not None:
         for doc in documents:
-            if doc.get("kind") == "A1":
+            if doc.get("kind") == kind:
+                patent = doc
+                break
+    else:
+        latest_date = None
+        for doc in documents:
+            publication_date = get_epodoc_value(doc, "publication-reference", "date")
+            if latest_date is None or publication_date > latest_date:
+                latest_date = publication_date
                 patent = doc
     if patent is None:
-        raise EPOUpstreamError("EPO response did not contain B1 or A1 publication data")
+        raise EPOUpstreamError("EPO response did not contain requested publication data")
     details["publication_number"] = get_epodoc_value(patent, "publication-reference", "doc-number")
     details["filing_date"] = get_epodoc_value(patent, "application-reference", "date")
     details["title"] = get_title(patent)

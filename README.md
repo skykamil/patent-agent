@@ -6,7 +6,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 **Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, and Docker containerization.
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, Docker containerization, an automated EC2 deployment script, and a lightweight browser chat frontend served directly by FastAPI. Public HTTPS reverse-proxy configuration is still in progress.
 
 ### Core v1.0
 
@@ -27,7 +27,8 @@ Current development focuses on productionizing the existing agent rather than ex
 
 ### Productionization after v1.0
 
-- FastAPI HTTP interface with `POST /chat` and a simple `GET /` health endpoint
+- FastAPI HTTP interface with `POST /chat`, a browser frontend on `GET /`, and a dedicated `GET /health` health endpoint
+- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text and ordered/unordered lists
 - Pydantic request and response models for the chat API
 - Automatic OpenAPI / Swagger UI documentation
 - FastAPI lifespan initialization for SQLite
@@ -38,12 +39,13 @@ Current development focuses on productionizing the existing agent rather than ex
 - Explicit HTTP error mapping for conversation lookup, upstream failures, rate limits, timeouts, and internal agent errors
 - Custom EPO exception hierarchy separating timeout, connection, rate-limit, and upstream failures; malformed XML is treated as an upstream failure
 - Explicit EPO request timeouts and a 60-second OpenAI request timeout, with automatic OpenAI SDK retries disabled
-- Hard runtime limits of three agent iterations and five tool calls per request
+- Hard runtime limits of three agent iterations and 30 tool calls per request
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
 - Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
 - Persistent global daily request cap for `POST /chat`: up to 50 requests per day may reach agent execution; the counter is incremented atomically in SQLite immediately before `run_agent()` and resets at midnight in `Europe/Warsaw`
 - Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
 - Docker containerization with a slim Python image, `.dockerignore`, runtime environment variables, and SQLite persistence through a named volume
+- Automated AWS EC2 deployment via `scripts/deploy.sh`, with application secrets loaded from SSM Parameter Store, persistent SQLite storage under `/data`, and the API port published only on host `127.0.0.1:8000`
 
 ## Tools
 
@@ -76,6 +78,7 @@ All three schemas use `"strict": true`, which requires every property to be list
 - Pydantic
 - Uvicorn
 - Docker
+- Vanilla HTML, CSS, and JavaScript
 
 ## Installation
 
@@ -132,6 +135,18 @@ Start the development server:
 
 ```bash
 uvicorn api:app --reload
+```
+
+The browser chat interface is available at:
+
+```text
+http://127.0.0.1:8000/
+```
+
+A dedicated health endpoint is available at:
+
+```text
+http://127.0.0.1:8000/health
 ```
 
 Interactive OpenAPI documentation and request testing are available at:
@@ -214,7 +229,7 @@ For stable cases, the harness checks required response content. For `search_pate
 
 The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
 
-Last verified on **2026-08-30**:
+Last verified on **2026-09-10**:
 
 - **Tool-call eval: 11/11**
 - **Final-response eval: 11/11**
@@ -268,6 +283,10 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
 | `api.py` | FastAPI application, request/response models, conversation handling, rate limiting, daily usage enforcement, and history serialization |
 | `logs_db.py` | SQLite schema, tool-call logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
+| `static/index.html` | Browser chat interface structure |
+| `static/styles.css` | Chat layout, message styling, composer, and working indicator |
+| `static/app.js` | Browser-side chat behavior, API requests, conversation state, Markdown rendering, keyboard handling, and auto-scroll |
+| `scripts/deploy.sh` | Automated EC2 deployment script |
 | `requirements.txt` | Python dependencies |
 | `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn |
 | `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context |
@@ -278,7 +297,7 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- Deployment
+- Public HTTPS reverse proxy and final public deployment setup
 - Observability for errors, latency, and token usage
 - Retry/backoff behavior for external API failures and rate limits
 - API and persistence tests
@@ -286,7 +305,7 @@ Version 1.0 remains the frozen core agent milestone. Current work focuses on pro
 
 ## Out of Scope
 
-Deliberately excluded from this project: integration with commercial patent/IP management platforms, multi-agent orchestration, agent frameworks (LangChain and similar), patent lifecycle documents beyond A1/B1 (A2, B2 and so on), and OPS services other than published-data search and biblio (images, fulltext, family, register, legal, classification, number-service).
+Deliberately excluded from this project: integration with commercial patent/IP management platforms, multi-agent orchestration, agent frameworks (LangChain and similar), and OPS services other than published-data search and biblio (images, fulltext, family, register, legal, classification, number-service).
 
 ## License
 
@@ -300,9 +319,9 @@ Other known limitations:
 
 - `search_patent` returns publication numbers only — no titles, applicants, or dates. Enriching results requires a separate `get_patent_details` call per number, which the tool description explicitly discourages the model from doing automatically.
 - `search_patent` returns 25 records per page. OPS exposes the total hit count but allows retrieval of only the first 2,000 records from a result set, so at most 80 pages are accessible. Broader searches must be narrowed to reach records beyond that limit.
-- `get_patent_details` selects the B1 document if present, otherwise A1. Any other kind code is ignored; malformed or unusable upstream responses may therefore surface as an API error rather than a patent result.
+- `get_patent_details` normalizes publication-number input before the EPODOC lookup. If the input includes a publication kind code, the matching returned publication is selected; if no kind code is supplied, the latest returned publication is selected by publication date.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
-- The agent is hard-capped at three model/tool iterations and five tool calls per request. Exceeding either limit raises an internal runtime-limit error instead of returning a potentially incomplete answer.
+- The agent is hard-capped at three model/tool iterations and 30 tool calls per request. Exceeding either limit raises an internal runtime-limit error instead of returning a potentially incomplete answer.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
 - EPO timeouts, connection failures, HTTP 429 responses, upstream 5xx responses, and malformed XML are handled explicitly and propagated to the HTTP layer. Other unexpected tool failures surface as internal server errors.
 - Rate limits are detected separately for both EPO and OpenAI, but there is not yet any retry or backoff behavior.

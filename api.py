@@ -4,7 +4,8 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, status, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimitError
 from openai.types.responses.response_input_param import ResponseInputParam
@@ -44,6 +45,8 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.exception_handler(Exception)
 async def internal_exception_handler(request: Request, exc: Exception):
@@ -157,8 +160,7 @@ def chat(payload: ChatRequest, request: Request):
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="OpenAI request timed out")
     except RateLimitError:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="OpenAI rate limit exceeded")
-    except APIStatusError as e:
-        print(e.status_code)
+    except APIStatusError:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="OpenAI returned an upstream error")
     except APIConnectionError:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
@@ -167,6 +169,10 @@ def chat(payload: ChatRequest, request: Request):
     save_conversation(conversation_id, history_json)
     return {"answer": final_response, "conversation_id": conversation_id}
 
-@app.get("/", status_code=status.HTTP_200_OK)
+@app.get("/", response_class=FileResponse)
+def frontend():
+    return FileResponse("static/index.html")
+
+@app.get("/health", status_code=status.HTTP_200_OK)
 def health():
     return {"status": "ok"}

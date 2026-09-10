@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Patent Research Agent</title>
+        <link rel="stylesheet" href="/static/styles.css">
+    </head>
+    <body>
+        <main class="app">
+            <header class="app-header">
+                <div>
+                    <h1>Patent Research Agent</h1>
+                    <p class="subtitle">AI-assisted EPO patent research</p>
+                </div>
+            </header>
+
+            <section class="chat-area">
+                <div id="chat"></div>
+                <div id="status" aria-live="polite"></div>
+            </section>
+
+            <form id="chat-form">
+                <textarea id="message" placeholder="Ask about a patent..."></textarea>
+                <button type="submit">Send</button>
+            </form>
+        </main>
+        <script src="/static/app.js"></script>
+    </body>
+</html>
