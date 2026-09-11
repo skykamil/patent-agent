@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field, field_validator
 from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimitError
 from openai.types.responses.response_input_param import ResponseInputParam
 from contextlib import asynccontextmanager
-from logs_db import init_db, save_conversation, load_conversation, try_increment_daily_usage
-from patent_agent import (run_agent, EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError)
+from logs_db import init_db, save_conversation, load_conversation, try_increment_daily_usage, log_request
+from patent_agent import (run_agent, EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError, AgentRuntimeLimitError)
 
 MAX_HISTORY_CHARS = 100_000
 RATE_LIMIT_REQUESTS = 10
@@ -127,47 +127,107 @@ def check_rate_limit(client_ip: str) -> None:
         },
     )
 def chat(payload: ChatRequest, request: Request):
-    client_ip = get_client_ip(request)
-    check_rate_limit(client_ip)
-    conversation_id = payload.conversation_id or str(uuid.uuid4())
-    run_id = str(uuid.uuid4())
-    history_json = load_conversation(conversation_id)
-    if payload.conversation_id is not None and history_json is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation ID not found")
-    if history_json is None:
-        input_list: ResponseInputParam = []
-    else:
-        input_list = json.loads(history_json)
-    input_list.append({"role": "user", "content": payload.message})
-    if len(json.dumps(input_list)) > MAX_HISTORY_CHARS:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation history is too large")
-    day = datetime.now(DAILY_LIMIT_TIMEZONE).date().isoformat()
-    if not try_increment_daily_usage(day, DAILY_REQUEST_LIMIT):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily request limit reached")
+    start_time = time.monotonic()
+    run_id = None
+    conversation_id = payload.conversation_id
+    status_code = status.HTTP_200_OK
+    error_type = None
+    error_message = None
+    token_usage = {
+        "input": 0,
+        "output": 0,
+    }
     try:
-        actual_calls, tool_outputs, final_response = run_agent(input_list, run_id, payload.message)
-    except EPOTimeoutError:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="EPO request timed out")
-    except EPOConnectionError:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="EPO service unavailable")
-    except EPORateLimitError:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="EPO rate limit exceeded")
-    except EPOUpstreamError:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="EPO returned an upstream error")
-    except AgentInternalError:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
-    except APITimeoutError:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="OpenAI request timed out")
-    except RateLimitError:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="OpenAI rate limit exceeded")
-    except APIStatusError:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="OpenAI returned an upstream error")
-    except APIConnectionError:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
-    serialized_history = serialize_history(input_list)
-    history_json = json.dumps(serialized_history)
-    save_conversation(conversation_id, history_json)
-    return {"answer": final_response, "conversation_id": conversation_id}
+        try:
+            client_ip = get_client_ip(request)
+        except HTTPException:
+            error_type = "client_ip_unavailable"
+            raise
+        try:
+            check_rate_limit(client_ip)
+        except HTTPException:
+            error_type = "ip_rate_limit"
+            raise
+        conversation_id = payload.conversation_id or str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
+        history_json = load_conversation(conversation_id)
+        if payload.conversation_id is not None and history_json is None:
+            error_type = "conversation_not_found"
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation ID not found")
+        if history_json is None:
+            input_list: ResponseInputParam = []
+        else:
+            input_list = json.loads(history_json)
+        input_list.append({"role": "user", "content": payload.message})
+        if len(json.dumps(input_list)) > MAX_HISTORY_CHARS:
+            error_type = "history_too_large"
+            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation history is too large")
+        day = datetime.now(DAILY_LIMIT_TIMEZONE).date().isoformat()
+        if not try_increment_daily_usage(day, DAILY_REQUEST_LIMIT):
+            error_type = "daily_rate_limit"
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily request limit reached")
+        try:
+            _, _, final_response = run_agent(input_list, run_id, payload.message, token_usage)
+        except EPOTimeoutError as e:
+            error_type = "epo_timeout"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="EPO request timed out")
+        except EPOConnectionError as e:
+            error_type = "epo_connection"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="EPO service unavailable")
+        except EPORateLimitError as e:
+            error_type = "epo_rate_limit"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="EPO rate limit exceeded")
+        except EPOUpstreamError as e:
+            error_type = "epo_upstream"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="EPO returned an upstream error")
+        except AgentRuntimeLimitError as e:
+            error_type = "agent_runtime_limit"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Agent runtime limit reached")
+        except AgentInternalError as e:
+            error_type = "agent_internal"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
+        except APITimeoutError as e:
+            error_type = "openai_timeout"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="OpenAI request timed out")
+        except RateLimitError as e:
+            error_type = "openai_rate_limit"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="OpenAI rate limit exceeded")
+        except APIStatusError as e:
+            error_type = "openai_upstream"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="OpenAI returned an upstream error")
+        except APIConnectionError as e:
+            error_type = "openai_connection"
+            error_message = str(e)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
+        serialized_history = serialize_history(input_list)
+        history_json = json.dumps(serialized_history)
+        save_conversation(conversation_id, history_json)
+        return {"answer": final_response, "conversation_id": conversation_id}
+    except HTTPException as e:
+        status_code = e.status_code
+        if error_message is None:
+            error_message = str(e.detail)
+        raise
+    except Exception as e:
+        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        error_type = "internal_error"
+        error_message = str(e)
+        raise
+    finally:
+        try:
+            latency_ms = (time.monotonic() - start_time) * 1000
+            log_request(run_id, conversation_id, status_code, latency_ms, error_type, error_message, token_usage["input"], token_usage["output"])
+        except Exception as log_error:
+            print(f"Failed to write request log: {log_error}")
 
 @app.get("/", response_class=FileResponse)
 def frontend():

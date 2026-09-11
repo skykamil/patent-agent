@@ -6,7 +6,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 **Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
 
 ### Core v1.0
 
@@ -43,6 +43,7 @@ Current development focuses on productionizing the existing agent rather than ex
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
 - Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
 - Persistent global daily request cap for `POST /chat`: up to 50 requests per day may reach agent execution; the counter is incremented atomically in SQLite immediately before `run_agent()` and resets at midnight in `Europe/Warsaw`
+- Request-level observability for `POST /chat` requests that reach the route: HTTP status, end-to-end latency, classified error type/message, OpenAI input/output/total token usage, and `run_id` / `conversation_id` correlation stored in SQLite
 - Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
 - Docker containerization with a slim Python image, `.dockerignore`, runtime environment variables, and SQLite persistence through a named volume
 - Automated AWS EC2 deployment via `scripts/deploy.sh`, with application secrets loaded from SSM Parameter Store, persistent SQLite storage under `/data`, and the API port published only on host `127.0.0.1:8000`
@@ -212,7 +213,7 @@ docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/l
 
 The API port is bound to `127.0.0.1` on the host rather than exposed directly to the Internet. Public traffic is handled by Caddy on ports 80 and 443 and reverse-proxied to FastAPI on `127.0.0.1:8000`.
 
-The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
+The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, request-level observability logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
 
 ## Evaluation
 
@@ -237,14 +238,14 @@ Last verified on **2026-09-10**:
 
 The harness does not independently verify that EPO OPS data itself is correct, and it is not a legal-status validator. It checks whether the agent selected the expected tools and whether its final answer reflects the returned tool data and required caveats.
 
-## Logging, Conversation Persistence, and Usage Limits
+## Logging, Observability, Conversation Persistence, and Usage Limits
 
 Tool-call execution is logged to `agent_logs` in the SQLite database configured by `DATABASE_PATH`. If `DATABASE_PATH` is not set, the application defaults to `logs_db.db` in the current working directory:
 
 | Column | Description |
 | --- | --- |
 | `id` | Autoincrement primary key |
-| `run_id` | UUID4 used to group related tool-call log rows. In the REPL it identifies the whole conversation until `N` starts a new one; in the FastAPI layer a new `run_id` is created for each `POST /chat` request. |
+| `run_id` | UUID4 used to group related tool-call log rows. In the REPL it identifies the whole conversation until `N` starts a new one; in the FastAPI layer a new `run_id` is created for each `POST /chat` request that passes the per-IP limiter. |
 | `timestamp` | ISO 8601, local time |
 | `user_input` | The original natural-language question |
 | `tool_name` | Which tool was called |
@@ -256,7 +257,27 @@ Tool-call execution is logged to `agent_logs` in the SQLite database configured 
 
 `run_id` makes it possible to reconstruct a multi-step chain after the fact — for example `get_patent_details` followed by `expiration_date`, sharing one `run_id` across two rows. For completed tool calls, the row is updated with the model's final response for that turn, so it shows both the tool call and the text the model ultimately gave the user. Rows logged immediately before a propagated failure can retain a `NULL` `final_response`.
 
-API conversation state is tracked separately through `conversation_id` in the `conversations` table. `agent_logs` does not yet store `conversation_id`, so conversation-level tracing across multiple HTTP requests is not yet available.
+Request-level API observability is stored separately in the `request_logs` table:
+
+| Column | Description |
+| --- | --- |
+| `id` | Autoincrement primary key |
+| `run_id` | UUID4 for the request run; `NULL` when the request is rejected before a run ID is created |
+| `conversation_id` | API conversation ID when available |
+| `timestamp` | ISO 8601 timestamp recorded when the request log is written |
+| `status_code` | Final HTTP status associated with the request |
+| `latency_ms` | End-to-end route execution time in milliseconds |
+| `error_type` | Classified internal error type; `NULL` on success |
+| `error_message` | Error detail or exception text; `NULL` on success |
+| `input_tokens` | Sum of OpenAI input tokens reported by successful Responses API calls during the request |
+| `output_tokens` | Sum of OpenAI output tokens reported by successful Responses API calls during the request |
+| `total_tokens` | `input_tokens + output_tokens` |
+
+A `request_logs` row is written from the route's `finally` block, so successful requests and handled failures are both recorded. Requests rejected by FastAPI/Pydantic request-model validation before `chat()` executes, such as HTTP `422`, are not currently included.
+
+For requests that reach agent execution, `request_logs.run_id` matches the `run_id` used by `agent_logs`, allowing request-level latency, errors, and token usage to be correlated with individual tool calls. `conversation_id` additionally allows multiple HTTP requests belonging to the same persisted conversation to be traced together.
+
+`agent_logs` still does not store `conversation_id` directly, but API requests can now be correlated through `request_logs`: `conversation_id` groups requests belonging to the same conversation, while the shared `run_id` links a request to its tool-call rows when agent execution occurs.
 
 Persistent API conversation state is stored in the `conversations` table:
 
@@ -282,8 +303,8 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | File | Description |
 | --- | --- |
 | `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
-| `api.py` | FastAPI application, request/response models, conversation handling, rate limiting, daily usage enforcement, and history serialization |
-| `logs_db.py` | SQLite schema, tool-call logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
+| `api.py` | FastAPI application, request/response models, conversation handling, rate limiting, daily usage enforcement, request observability, and history serialization |
+| `logs_db.py` | SQLite schema, tool-call and request logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
 | `static/index.html` | Browser chat interface structure |
 | `static/styles.css` | Chat layout, message styling, composer, and working indicator |
 | `static/app.js` | Browser-side chat behavior, API requests, conversation state, Markdown rendering, keyboard handling, and auto-scroll |
@@ -294,13 +315,12 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn |
 | `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
-| `logs_db.db` | Default local SQLite database for agent logs, persistent conversation history, and daily usage counters; the path can be overridden with `DATABASE_PATH` |
+| `logs_db.db` | Default local SQLite database for tool logs, request observability, persistent conversation history, and daily usage counters; the path can be overridden with `DATABASE_PATH` |
 
 ## Next
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- Observability for errors, latency, and token usage
 - Retry/backoff behavior for external API failures and rate limits
 - API and persistence tests
 - Further separation of API, agent, persistence, and domain layers
@@ -332,7 +352,8 @@ Other known limitations:
 - There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.
 - API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
-- `POST /chat` creates a new `run_id` for each agent execution while `conversation_id` identifies the multi-turn conversation. `agent_logs` does not yet store `conversation_id`.
+- `POST /chat` creates a `run_id` after the request passes the per-IP limiter. `request_logs` stores both `run_id` and `conversation_id`, while `agent_logs` stores `run_id` only; the shared ID allows request logs to be correlated with tool-call logs. Requests rejected before `run_id` creation are logged with a `NULL` run ID.
+- Request-level observability currently begins inside the validated `POST /chat` route. Requests rejected earlier by FastAPI/Pydantic validation, such as HTTP `422`, are not written to `request_logs`.
 - The API currently has no authentication or authorization. Abuse protection consists of a per-IP request limiter and a persistent global daily request cap; it is not a user/account-level quota or identity system.
 - The per-IP limiter is a best-effort, process-local safeguard stored only in application memory. It resets when the process or container restarts, is not shared across multiple application workers or instances, and is not synchronized across concurrent requests. The global daily cap is enforced atomically in SQLite and survives restarts and container recreation as long as the persistent database volume is retained.
 - Persisted API conversation history is not trimmed, summarized, expired, or automatically cleaned up. However, before an agent run, serialized history plus the new message is capped at 100,000 characters; requests exceeding that limit are rejected with HTTP 413.

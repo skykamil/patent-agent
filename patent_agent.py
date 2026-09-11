@@ -336,7 +336,12 @@ def expiration_date(filing_date):
     expiration = parsed.replace(year=parsed.year + 20)
     return expiration.strftime("%Y%m%d")
 
-def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
+def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, token_usage: dict[str, int] | None = None,):
+    if token_usage is None:
+        token_usage = {
+            "input": 0,
+            "output": 0,
+        }
     logged_ids = []
     actual_calls = []
     tool_outputs = []
@@ -346,13 +351,16 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
             tools=tools,
             input=input_list,
     )
+    usage = response.usage
+    if usage is not None:
+        token_usage["input"] += usage.input_tokens
+        token_usage["output"] += usage.output_tokens
     print(response.output)
     for item in response.output:
         input_list.append(cast(ResponseInputItemParam, item))
     i=0
     while any(item.type == "function_call" for item in response.output) and i < MAX_AGENT_ITERATIONS:
         for item in response.output:
-                item.model_dump()
                 if item.type == "function_call":
                         if item.name in ["search_patent", "get_patent_details", "expiration_date"]:
                             tool_call_count += 1
@@ -470,6 +478,10 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str):
                 tools=tools,
                 input=input_list,
         )
+        usage = response.usage
+        if usage is not None:
+            token_usage["input"] += usage.input_tokens
+            token_usage["output"] += usage.output_tokens
         for item in response.output:
             input_list.append(cast(ResponseInputItemParam, item))
         i += 1

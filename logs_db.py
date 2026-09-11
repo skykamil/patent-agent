@@ -39,6 +39,35 @@ def init_db():
             request_count INTEGER NOT NULL
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS request_logs(
+        id INTEGER PRIMARY KEY,
+        run_id TEXT,
+        conversation_id TEXT,
+        timestamp TEXT,
+        status_code INTEGER,
+        latency_ms REAL,
+        error_type TEXT,
+        error_message TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        total_tokens INTEGER
+        )
+    """)
+    con.commit()
+    con.close()
+
+def log_request(run_id, conversation_id, status_code, latency_ms, error_type, error_message, input_tokens, output_tokens):
+    con = get_connection()
+    cur = con.cursor()
+    timestamp = datetime.now().isoformat()
+    cur.execute(
+        """
+        INSERT INTO request_logs(run_id, conversation_id, timestamp, status_code, latency_ms, error_type, error_message, input_tokens, output_tokens, total_tokens)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, conversation_id, timestamp, status_code, latency_ms, error_type, error_message, input_tokens, output_tokens, input_tokens+output_tokens)
+    )
     con.commit()
     con.close()
 
