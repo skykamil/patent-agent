@@ -47,6 +47,16 @@ function renderMarkdown(text, container) {
             continue;
         }
 
+        if (trimmedLine.startsWith("### ")) {
+            currentList = null;
+
+            const heading = document.createElement("h3");
+            addFormattedText(heading, trimmedLine.slice(4));
+            container.appendChild(heading);
+
+            continue;
+        }
+
         const orderedMatch = trimmedLine.match(/^\d+\.\s+(.*)$/);
         const unorderedMatch = trimmedLine.match(/^[-*]\s+(.*)$/);
 

@@ -253,7 +253,22 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, 
             query.append(f'{name}="{value}"')
     query_string = " and ".join(query)
     r = requests.get("https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string}, timeout=EPO_TIMEOUT)
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            fault_root = ET.fromstring(e.response.text)
+            code = fault_root.find("ops:code", ns)
+            if code is not None and code.text == "SERVER.EntityNotFound":
+                return {
+                    "results": [],
+                    "total_results": 0,
+                    "page": page,
+                    "total_pages": 0,
+                    "available_pages": 0,
+                    "truncated": False,
+                }
+        raise
     root = ET.fromstring(r.text)
     search_info = root.find('.//ops:biblio-search', ns)
     if search_info is None:
@@ -477,6 +492,7 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, toke
                 model="gpt-5.6-luna",
                 tools=tools,
                 input=input_list,
+                tool_choice="none" if i == MAX_AGENT_ITERATIONS - 1 else "auto",
         )
         usage = response.usage
         if usage is not None:

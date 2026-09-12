@@ -28,7 +28,7 @@ Current development focuses on productionizing the existing agent rather than ex
 ### Productionization after v1.0
 
 - FastAPI HTTP interface with `POST /chat`, a browser frontend on `GET /`, and a dedicated `GET /health` health endpoint
-- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text, italic text, level-two headings, and ordered/unordered lists
+- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text, italic text, level-two and level-three headings, and ordered/unordered lists
 - Pydantic request and response models for the chat API
 - Automatic OpenAPI / Swagger UI documentation
 - FastAPI lifespan initialization for SQLite
@@ -343,7 +343,7 @@ Other known limitations:
 - `search_patent` returns 25 records per page. OPS exposes the total hit count but allows retrieval of only the first 2,000 records from a result set, so at most 80 pages are accessible. Broader searches must be narrowed to reach records beyond that limit.
 - `get_patent_details` currently accepts publication numbers consisting of a two-letter country code, a numeric publication number, and an optional kind code of one letter with an optional digit. Other publication-number formats are rejected as unsupported.
 - Open-ended date ranges are a workaround in Python, not CQL. `pd_from` alone is expanded to a range ending at today's date, meaning the same query can produce different results on different days; `pd_to` alone is expanded to a range starting at the hardcoded constant `19000101`.
-- The agent is hard-capped at three model/tool iterations and 30 tool calls per request. Exceeding either limit raises an internal runtime-limit error instead of returning a potentially incomplete answer.
+- The agent is hard-capped at three tool-execution iterations and 30 tool calls per request. On the final allowed iteration, further tool calls are disabled and the model must produce a final response from the data already collected; exceeding the separate 30-tool-call limit still raises an internal runtime-limit error.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
 - EPO timeouts, connection failures, HTTP 429 responses, upstream 5xx responses, and malformed XML are handled explicitly and propagated to the HTTP layer. Other unexpected tool failures surface as internal server errors.
 - Rate limits are detected separately for both EPO and OpenAI, but there is not yet any retry or backoff behavior.
