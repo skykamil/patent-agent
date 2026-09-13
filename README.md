@@ -6,7 +6,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 **Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, retry/backoff for transient upstream failures, automated retry tests, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
 
 ### Core v1.0
 
@@ -38,7 +38,11 @@ Current development focuses on productionizing the existing agent rather than ex
 - Request validation with Pydantic, including rejection of empty and whitespace-only messages
 - Explicit HTTP error mapping for conversation lookup, upstream failures, rate limits, timeouts, and internal agent errors
 - Custom EPO exception hierarchy separating timeout, connection, rate-limit, and upstream failures; malformed XML is treated as an upstream failure
-- Explicit EPO request timeouts and a 60-second OpenAI request timeout, with automatic OpenAI SDK retries disabled
+- Explicit EPO request timeouts plus retry/backoff for transient EPO failures: timeouts, connection errors, HTTP 429, and HTTP 5xx responses are retried up to three total attempts using Tenacity
+- EPO retry waits use exponential backoff as a fallback and honor `Retry-After` on HTTP 429 responses in both delay-seconds and HTTP-date formats
+- OpenAI requests use a 60-second timeout and the OpenAI SDK's built-in retry behavior with `max_retries=2`
+- Retry observability is stored in SQLite with `run_id`, `tool_call_id`, tool name, service, attempt number, retry reason, and wait duration
+- Automated pytest coverage for the EPO retry layer, including success, non-retryable HTTP errors, 429/5xx failures, timeout/connection failures, retry logging, `Retry-After`, and invalid-header fallback
 - Hard runtime limits of three agent iterations and 30 tool calls per request
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
 - Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
@@ -74,6 +78,7 @@ All three schemas use `"strict": true`, which requires every property to be list
 - OpenAI Responses API (`gpt-5.6-luna`), raw function calling — no agent framework
 - EPO OPS 3.2 REST API (OAuth2 client credentials, CQL search)
 - `requests`
+- Tenacity
 - `xml.etree.ElementTree` (standard library — chosen over `lxml`, since only a handful of fields are read)
 - SQLite3
 - FastAPI
@@ -213,7 +218,7 @@ docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/l
 
 The API port is bound to `127.0.0.1` on the host rather than exposed directly to the Internet. Public traffic is handled by Caddy on ports 80 and 443 and reverse-proxied to FastAPI on `127.0.0.1:8000`.
 
-The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, request-level observability logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
+The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, request-level observability logs, retry logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
 
 ## Evaluation
 
@@ -277,6 +282,22 @@ A `request_logs` row is written from the route's `finally` block, so successful 
 
 For requests that reach agent execution, `request_logs.run_id` matches the `run_id` used by `agent_logs`, allowing request-level latency, errors, and token usage to be correlated with individual tool calls. `conversation_id` additionally allows multiple HTTP requests belonging to the same persisted conversation to be traced together.
 
+EPO retry events are stored separately in the `retry_logs` table:
+
+| Column | Description |
+| --- | --- |
+| `id` | Autoincrement primary key |
+| `run_id` | Request run ID used to correlate the retry with request and tool-call logs |
+| `tool_call_id` | OpenAI function-call ID for the tool invocation that triggered the retry |
+| `tool_name` | Agent tool being executed |
+| `timestamp` | ISO 8601 timestamp recorded when the retry is logged |
+| `service` | External service being retried; currently `EPO` |
+| `attempt` | Attempt number after which another retry will occur |
+| `reason` | Retry reason, such as `HTTP 500`, `HTTP 429`, `Timeout`, or `ConnectionError` |
+| `wait_seconds` | Delay before the next attempt |
+
+Retry logging is treated as non-critical observability: SQLite logging failures are suppressed so that a logging problem does not interrupt the underlying retry sequence.
+
 `agent_logs` still does not store `conversation_id` directly, but API requests can now be correlated through `request_logs`: `conversation_id` groups requests belonging to the same conversation, while the shared `run_id` links a request to its tool-call rows when agent execution occurs.
 
 Persistent API conversation state is stored in the `conversations` table:
@@ -304,7 +325,8 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | --- | --- |
 | `patent_agent.py` | Tool schemas, EPO OPS client, XML parsing, agent loop, eval set |
 | `api.py` | FastAPI application, request/response models, conversation handling, rate limiting, daily usage enforcement, request observability, and history serialization |
-| `logs_db.py` | SQLite schema, tool-call and request logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
+| `logs_db.py` | SQLite schema, tool-call, request, and retry logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
+| `tests/test_retry.py` | Pytest coverage for EPO retry/backoff behavior, Retry-After handling, retry observability, and fallback behavior |
 | `static/index.html` | Browser chat interface structure |
 | `static/styles.css` | Chat layout, message styling, composer, and working indicator |
 | `static/app.js` | Browser-side chat behavior, API requests, conversation state, Markdown rendering, keyboard handling, and auto-scroll |
@@ -315,13 +337,13 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn |
 | `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repo |
-| `logs_db.db` | Default local SQLite database for tool logs, request observability, persistent conversation history, and daily usage counters; the path can be overridden with `DATABASE_PATH` |
+| `logs_db.db` | Default local SQLite database for tool logs, request observability, retry logs, persistent conversation history, and daily usage counters; the path can be overridden with `DATABASE_PATH` |
 
 ## Next
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- Retry/backoff behavior for external API failures and rate limits
+- Jitter for EPO exponential-backoff retries
 - API and persistence tests
 - Further separation of API, agent, persistence, and domain layers
 
@@ -346,10 +368,10 @@ Other known limitations:
 - The agent is hard-capped at three tool-execution iterations and 30 tool calls per request. On the final allowed iteration, further tool calls are disabled and the model must produce a final response from the data already collected; exceeding the separate 30-tool-call limit still raises an internal runtime-limit error.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
 - EPO timeouts, connection failures, HTTP 429 responses, upstream 5xx responses, and malformed XML are handled explicitly and propagated to the HTTP layer. Other unexpected tool failures surface as internal server errors.
-- Rate limits are detected separately for both EPO and OpenAI, but there is not yet any retry or backoff behavior.
+- EPO transient failures now use explicit retry/backoff handling, including HTTP 429, HTTP 5xx, timeouts, connection errors, and `Retry-After`. OpenAI retries rely on the OpenAI SDK. EPO exponential-backoff retries do not yet include jitter.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
-- There are no unit tests. The eval set is the only automated check; it covers tool behavior and final-response completeness/contract checks, not the independent correctness of EPO OPS data.
+- The EPO retry layer has dedicated pytest coverage, but broader API, persistence, conversation, and domain-layer unit/integration tests are still missing. The eval harness remains responsible for agent tool-selection and final-response behavior and does not independently verify the correctness of EPO OPS data.
 - API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
 - `POST /chat` creates a `run_id` after the request passes the per-IP limiter. `request_logs` stores both `run_id` and `conversation_id`, while `agent_logs` stores `run_id` only; the shared ID allows request logs to be correlated with tool-call logs. Requests rejected before `run_id` creation are logged with a `NULL` run ID.

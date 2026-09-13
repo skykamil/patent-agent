@@ -7,9 +7,12 @@ import requests
 import xml.etree.ElementTree as ET
 from typing import cast
 from openai import OpenAI
+from contextvars import ContextVar
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from logs_db import init_db, log_tool_call, update_final_response
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from logs_db import init_db, log_tool_call, update_final_response, log_retry
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential, RetryCallState
 from openai.types.responses.function_tool_param import FunctionToolParam
 from openai.types.responses.response_input_param import ResponseInputParam, ResponseInputItemParam, FunctionCallOutput
 
@@ -41,11 +44,17 @@ ns = {"ex": "http://www.epo.org/exchange", "ops": "http://ops.epo.org"}
 epo_token = None
 epo_token_expiry = None
 EPO_TIMEOUT = (3.05, 10)
+EPO_MAX_RETRIES = 2
+EPO_BACKOFF_BASE_SECONDS = 0.5
+epo_exponential_wait = wait_exponential(multiplier=EPO_BACKOFF_BASE_SECONDS)
 OPENAI_TIMEOUT = 60.0
 MAX_AGENT_ITERATIONS = 3
 MAX_TOOL_CALLS = 30
+current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)
+current_tool_name: ContextVar[str | None] = ContextVar("current_tool_name", default=None)
+current_tool_call_id: ContextVar[str | None] = ContextVar("current_tool_call_id", default=None)
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=OPENAI_TIMEOUT, max_retries=0)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=OPENAI_TIMEOUT, max_retries=2)
 
 tools: list[FunctionToolParam] = [
     {
@@ -125,6 +134,81 @@ tools: list[FunctionToolParam] = [
     },
 ]
 
+def is_retryable_epo_exception(exc) -> bool:
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status_code = exc.response.status_code
+        if status_code == 429 or (500 <= status_code < 600):
+            return True
+    return False
+
+def wait_epo_retry(retry_state: RetryCallState) -> float:
+    fallback_wait = epo_exponential_wait(retry_state)
+    outcome = retry_state.outcome
+    if outcome is None:
+        return fallback_wait
+    exc = outcome.exception()
+    if exc is None:
+        return fallback_wait
+    if isinstance(exc, requests.exceptions.HTTPError):
+        if exc.response is None:
+            return fallback_wait
+        status_code = exc.response.status_code
+        if status_code == 429:
+            retry_after = exc.response.headers.get("Retry-After")
+            if retry_after is None:
+                return fallback_wait
+            try:
+                retry_after_seconds = int(retry_after)
+                if retry_after_seconds > 0:
+                    return float(retry_after_seconds)
+                return fallback_wait
+            except ValueError:
+                try:
+                    retry_time = parsedate_to_datetime(retry_after)
+                except ValueError:
+                    return fallback_wait
+                now = datetime.now(timezone.utc)
+                wait_seconds = (retry_time - now).total_seconds()
+                if wait_seconds > 0:
+                    return wait_seconds
+                return fallback_wait
+    return fallback_wait
+
+def log_epo_retry(retry_state: RetryCallState) -> None:
+    attempt = retry_state.attempt_number
+    outcome = retry_state.outcome
+    if outcome is None:
+        return
+    exc = outcome.exception()
+    if exc is None:
+        return
+    next_action = retry_state.next_action
+    if next_action is None:
+        return
+    wait_seconds = next_action.sleep
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        reason = f"HTTP {exc.response.status_code}"
+    else:
+        reason = type(exc).__name__
+    run_id = current_run_id.get()
+    tool_name = current_tool_name.get()
+    tool_call_id = current_tool_call_id.get()
+    log_retry(run_id, tool_call_id, tool_name, "EPO", attempt, reason, wait_seconds)
+
+@retry(
+    stop=stop_after_attempt(EPO_MAX_RETRIES + 1),
+    wait=wait_epo_retry,
+    retry=retry_if_exception(is_retryable_epo_exception),
+    reraise=True,
+    before_sleep=log_epo_retry
+)
+def epo_request_with_retry(method, url, **kwargs) -> requests.Response:
+    response = requests.request(method, url, **kwargs)
+    response.raise_for_status()
+    return response
+
 def get_epo_access_token():
     global epo_token, epo_token_expiry
     consumer_key = os.getenv("EPO_CONSUMER_KEY")
@@ -136,9 +220,8 @@ def get_epo_access_token():
     if epo_token is not None and epo_token_expiry is not None and datetime.now() < epo_token_expiry:
         return epo_token
     else:
-        r = requests.post('https://ops.epo.org/3.2/auth/accesstoken', auth=(consumer_key, secret_consumer), data={'grant_type': 'client_credentials'}, timeout=EPO_TIMEOUT)
         try:
-            r.raise_for_status()
+            r = epo_request_with_retry("POST", 'https://ops.epo.org/3.2/auth/accesstoken', auth=(consumer_key, secret_consumer), data={'grant_type': 'client_credentials'}, timeout=EPO_TIMEOUT)
         except requests.exceptions.HTTPError as e:
             if e.response.status_code in (401, 403):
                 raise EPOUpstreamError("EPO authentication failed") from e
@@ -252,9 +335,8 @@ def search_patent(ti=None, pa=None, pn=None, ap=None, pd_from=None, pd_to=None, 
         if value is not None:
             query.append(f'{name}="{value}"')
     query_string = " and ".join(query)
-    r = requests.get("https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string}, timeout=EPO_TIMEOUT)
     try:
-        r.raise_for_status()
+        r = epo_request_with_retry("GET", "https://ops.epo.org/rest-services/published-data/search", headers=headers, params={"q": query_string}, timeout=EPO_TIMEOUT)
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
             fault_root = ET.fromstring(e.response.text)
@@ -317,8 +399,7 @@ def get_patent_details(pn):
     details = {}
     token = get_epo_access_token()
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{epodoc_pn}/biblio", headers=headers, timeout=EPO_TIMEOUT)
-    r.raise_for_status()
+    r = epo_request_with_retry("GET", f"https://ops.epo.org/rest-services/published-data/publication/epodoc/{epodoc_pn}/biblio", headers=headers, timeout=EPO_TIMEOUT)
     root = ET.fromstring(r.text)
     documents = root.findall('.//ex:exchange-document', ns)
     patent = None
@@ -382,6 +463,9 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, toke
                             if tool_call_count > MAX_TOOL_CALLS:
                                 raise AgentRuntimeLimitError("Agent reached maximum tool call limit")
                             args = json.loads(item.arguments)
+                            run_id_token = current_run_id.set(run_id)
+                            tool_name_token = current_tool_name.set(item.name)
+                            tool_call_id_token = current_tool_call_id.set(item.call_id)
                             try:
                                 if item.name == "search_patent":
                                     patent_records = search_patent(**args)
@@ -478,6 +562,10 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, toke
                             else:
                                 status = "success"
                                 error_message = None
+                            finally:
+                                current_tool_call_id.reset(tool_call_id_token)
+                                current_tool_name.reset(tool_name_token)
+                                current_run_id.reset(run_id_token)
                             actual_calls.append({"name": item.name, "args": args})
                             tool_outputs.append({"name": item.name, "output": patent_records})
                             function_call_output: FunctionCallOutput = {

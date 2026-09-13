@@ -54,8 +54,41 @@ def init_db():
         total_tokens INTEGER
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS retry_logs(
+        id INTEGER PRIMARY KEY,
+        run_id TEXT,
+        tool_call_id TEXT,
+        tool_name TEXT,
+        timestamp TEXT,
+        service TEXT,
+        attempt INTEGER,
+        reason TEXT,
+        wait_seconds REAL
+        )
+    """)
     con.commit()
     con.close()
+
+def log_retry(run_id, tool_call_id, tool_name, service, attempt, reason, wait_seconds):
+    con = None
+    try:
+        con = get_connection()
+        cur = con.cursor()
+        timestamp = datetime.now().isoformat()
+        cur.execute(
+            """
+            INSERT INTO retry_logs(run_id, tool_call_id, tool_name, timestamp, service, attempt, reason, wait_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, tool_call_id, tool_name, timestamp, service, attempt, reason, wait_seconds)
+        )
+        con.commit()
+    except sqlite3.Error:
+        return
+    finally:
+        if con is not None:
+            con.close()
 
 def log_request(run_id, conversation_id, status_code, latency_ms, error_type, error_message, input_tokens, output_tokens):
     con = get_connection()
