@@ -8,7 +8,7 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 **Core agent complete — v1.0. Productionization in progress.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 closes the core CLI agent: EPO OPS search and bibliographic lookup, local patent-term calculation, multi-step tool use, logging, pagination, typed conversation history, and deterministic evaluation of both tool calls and final responses.
 
-Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, retry/backoff for transient upstream failures, automated retry tests, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
+Current development focuses on productionizing the existing agent rather than expanding its patent-domain capabilities. Productionization now includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, retry/backoff for transient upstream failures, automated retry and API/persistence tests, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
 
 ### Core v1.0
 
@@ -44,7 +44,7 @@ Current development focuses on productionizing the existing agent rather than ex
 - EPO retry waits use exponential backoff with random jitter as a fallback and honor `Retry-After` on HTTP 429 responses in both delay-seconds and HTTP-date formats
 - OpenAI requests use a 60-second timeout and the OpenAI SDK's built-in retry behavior with `max_retries=2`
 - Retry observability is stored in SQLite with `run_id`, `tool_call_id`, tool name, service, attempt number, retry reason, and wait duration
-- Automated pytest coverage for the EPO retry layer, including success, non-retryable HTTP errors, 429/5xx failures, timeout/connection failures, retry logging, `Retry-After`, and invalid-header fallback
+- Automated pytest coverage for the EPO retry layer and FastAPI conversation/persistence behavior. The API tests use temporary SQLite databases and controlled agent replacements, covering multi-turn persistence, persistence across application restarts, unknown conversations, request validation, and EPO timeout mapping
 - Hard runtime limits of three agent iterations and 30 tool calls per request
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
 - Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
@@ -329,6 +329,7 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `api.py` | FastAPI application, request/response models, conversation handling, rate limiting, daily usage enforcement, request observability, and history serialization |
 | `logs_db.py` | SQLite schema, tool-call, request, and retry logging, final-response updates, persistent conversation storage, and atomic daily-usage limiting |
 | `tests/test_retry.py` | Pytest coverage for EPO retry/backoff behavior, Retry-After handling, retry observability, and fallback behavior |
+| `tests/test_api.py` | Pytest coverage for FastAPI conversation persistence, restart persistence, request validation, unknown conversation handling, and selected API error mapping using temporary SQLite databases and controlled agent replacements |
 | `static/index.html` | Browser chat interface structure |
 | `static/styles.css` | Chat layout, message styling, composer, and working indicator |
 | `static/app.js` | Browser-side chat behavior, API requests, conversation state, Markdown rendering, keyboard handling, and auto-scroll |
@@ -345,7 +346,6 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- API and persistence tests
 - Further separation of API, agent, persistence, and domain layers
 
 ## Out of Scope
@@ -372,7 +372,7 @@ Other known limitations:
 - EPO transient failures now use explicit retry/backoff handling, including HTTP 429, HTTP 5xx, timeouts, connection errors, and `Retry-After`. OpenAI retries rely on the OpenAI SDK.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
-- The EPO retry layer has dedicated pytest coverage, but broader API, persistence, conversation, and domain-layer unit/integration tests are still missing. The eval harness remains responsible for agent tool-selection and final-response behavior and does not independently verify the correctness of EPO OPS data.
+- The EPO retry layer and core FastAPI conversation/persistence flows have dedicated pytest coverage. Broader domain-layer unit/integration tests are still limited. The eval harness remains responsible for agent tool-selection and final-response behavior and does not independently verify the correctness of EPO OPS data.
 - API conversation history is persisted as JSON in SQLite. The serializer is intentionally tailored to the Responses API item types currently used by this agent rather than being a general-purpose Responses API serializer.
 - Assistant history serialization currently assumes the relevant text is the first content item in the returned message.
 - `POST /chat` creates a `run_id` after the request passes the per-IP limiter. `request_logs` stores both `run_id` and `conversation_id`, while `agent_logs` stores `run_id` only; the shared ID allows request logs to be correlated with tool-call logs. Requests rejected before `run_id` creation are logged with a `NULL` run ID.

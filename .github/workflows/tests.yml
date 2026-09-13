@@ -27,4 +27,4 @@ jobs:
           pip install pytest
 
       - name: Run tests
-        run: python -m pytest tests/test_retry.py -q
+        run: python3 -m pytest -q
