@@ -1,5 +1,7 @@
 # Patent Research Agent
 
+[![Tests](https://github.com/skykamil/patent-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/skykamil/patent-agent/actions/workflows/tests.yml)
+
 A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite tool-call logging, and an eval harness that checks both tool-call behavior and the agent's final response.
 
 ## Status
