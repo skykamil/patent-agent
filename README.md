@@ -41,7 +41,7 @@ Current development focuses on productionizing the existing agent rather than ex
 - Explicit HTTP error mapping for conversation lookup, upstream failures, rate limits, timeouts, and internal agent errors
 - Custom EPO exception hierarchy separating timeout, connection, rate-limit, and upstream failures; malformed XML is treated as an upstream failure
 - Explicit EPO request timeouts plus retry/backoff for transient EPO failures: timeouts, connection errors, HTTP 429, and HTTP 5xx responses are retried up to three total attempts using Tenacity
-- EPO retry waits use exponential backoff as a fallback and honor `Retry-After` on HTTP 429 responses in both delay-seconds and HTTP-date formats
+- EPO retry waits use exponential backoff with random jitter as a fallback and honor `Retry-After` on HTTP 429 responses in both delay-seconds and HTTP-date formats
 - OpenAI requests use a 60-second timeout and the OpenAI SDK's built-in retry behavior with `max_retries=2`
 - Retry observability is stored in SQLite with `run_id`, `tool_call_id`, tool name, service, attempt number, retry reason, and wait duration
 - Automated pytest coverage for the EPO retry layer, including success, non-retryable HTTP errors, 429/5xx failures, timeout/connection failures, retry logging, `Retry-After`, and invalid-header fallback
@@ -345,7 +345,6 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 
 Version 1.0 remains the frozen core agent milestone. Current work focuses on productionizing the application rather than expanding the patent-domain feature set:
 
-- Jitter for EPO exponential-backoff retries
 - API and persistence tests
 - Further separation of API, agent, persistence, and domain layers
 
@@ -370,7 +369,7 @@ Other known limitations:
 - The agent is hard-capped at three tool-execution iterations and 30 tool calls per request. On the final allowed iteration, further tool calls are disabled and the model must produce a final response from the data already collected; exceeding the separate 30-tool-call limit still raises an internal runtime-limit error.
 - Within a REPL session, `input_list` grows with every turn and is never trimmed or summarized — long conversations mean larger, costlier prompts on each turn. History resets only on `N` (new conversation) or when the script exits; there is no persistence across separate runs of the script.
 - EPO timeouts, connection failures, HTTP 429 responses, upstream 5xx responses, and malformed XML are handled explicitly and propagated to the HTTP layer. Other unexpected tool failures surface as internal server errors.
-- EPO transient failures now use explicit retry/backoff handling, including HTTP 429, HTTP 5xx, timeouts, connection errors, and `Retry-After`. OpenAI retries rely on the OpenAI SDK. EPO exponential-backoff retries do not yet include jitter.
+- EPO transient failures now use explicit retry/backoff handling, including HTTP 429, HTTP 5xx, timeouts, connection errors, and `Retry-After`. OpenAI retries rely on the OpenAI SDK.
 - The CQL syntax used here was verified empirically against live requests rather than derived from the full documentation. It works for the tested combinations, but is not guaranteed to cover the operators or index names described in the parts of the reference guide that were not reachable.
 - The last verified eval scores are 11/11 for tool calls and 11/11 for final responses, but model output is non-deterministic; treat the scores as directional rather than as a guarantee.
 - The EPO retry layer has dedicated pytest coverage, but broader API, persistence, conversation, and domain-layer unit/integration tests are still missing. The eval harness remains responsible for agent tool-selection and final-response behavior and does not independently verify the correctness of EPO OPS data.

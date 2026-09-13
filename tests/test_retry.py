@@ -119,20 +119,15 @@ def test_epo_retry_logs_each_retry(monkeypatch):
     with pytest.raises(requests.exceptions.HTTPError):
         patent_agent.epo_request_with_retry("GET", "https://example.test")
     assert len(calls) == 3
-    assert retry_logs == [
-        {
-            "service": "EPO",
-            "attempt": 1,
-            "reason": "HTTP 500",
-            "wait_seconds": 0.5,
-        },
-        {
-            "service": "EPO",
-            "attempt": 2,
-            "reason": "HTTP 500",
-            "wait_seconds": 1.0,
-        },
-    ]
+    assert len(retry_logs) == 2
+    assert retry_logs[0]["service"] == "EPO"
+    assert retry_logs[0]["attempt"] == 1
+    assert retry_logs[0]["reason"] == "HTTP 500"
+    assert 0.5 <= retry_logs[0]["wait_seconds"] <= 0.75
+    assert retry_logs[1]["service"] == "EPO"
+    assert retry_logs[1]["attempt"] == 2
+    assert retry_logs[1]["reason"] == "HTTP 500"
+    assert 1.0 <= retry_logs[1]["wait_seconds"] <= 1.25
 
 def test_epo_request_uses_retry_after_second(monkeypatch):
     response = requests.Response()
@@ -197,5 +192,6 @@ def test_epo_request_falls_back_on_invalid_retry_after(monkeypatch):
     monkeypatch.setattr(patent_agent.epo_request_with_retry.retry, "sleep", lambda seconds: None)
     with pytest.raises(requests.exceptions.HTTPError):
         patent_agent.epo_request_with_retry("GET", "https://example.test")
-    assert retry_logs == [0.5, 1.0]
-    
+    assert len(retry_logs) == 2
+    assert 0.5 <= retry_logs[0] <= 0.75
+    assert 1.0 <= retry_logs[1] <= 1.25

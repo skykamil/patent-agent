@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from logs_db import init_db, log_tool_call, update_final_response, log_retry
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential, RetryCallState
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential, wait_random, RetryCallState
 from openai.types.responses.function_tool_param import FunctionToolParam
 from openai.types.responses.response_input_param import ResponseInputParam, ResponseInputItemParam, FunctionCallOutput
 
@@ -46,7 +46,7 @@ epo_token_expiry = None
 EPO_TIMEOUT = (3.05, 10)
 EPO_MAX_RETRIES = 2
 EPO_BACKOFF_BASE_SECONDS = 0.5
-epo_exponential_wait = wait_exponential(multiplier=EPO_BACKOFF_BASE_SECONDS)
+epo_backoff_wait = wait_exponential(multiplier=EPO_BACKOFF_BASE_SECONDS) + wait_random(min=0, max=0.25)
 OPENAI_TIMEOUT = 60.0
 MAX_AGENT_ITERATIONS = 3
 MAX_TOOL_CALLS = 30
@@ -144,7 +144,7 @@ def is_retryable_epo_exception(exc) -> bool:
     return False
 
 def wait_epo_retry(retry_state: RetryCallState) -> float:
-    fallback_wait = epo_exponential_wait(retry_state)
+    fallback_wait = epo_backoff_wait(retry_state)
     outcome = retry_state.outcome
     if outcome is None:
         return fallback_wait
