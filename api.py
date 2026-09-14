@@ -11,7 +11,8 @@ from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimi
 from openai.types.responses.response_input_param import ResponseInputParam
 from contextlib import asynccontextmanager
 from logs_db import init_db, save_conversation, load_conversation, try_increment_daily_usage, log_request
-from patent_agent import (run_agent, EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError, AgentRuntimeLimitError)
+from agent import run_agent
+from errors import (EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError, AgentRuntimeLimitError)
 
 MAX_HISTORY_CHARS = 100_000
 RATE_LIMIT_REQUESTS = 10
