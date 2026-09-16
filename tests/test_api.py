@@ -2,7 +2,9 @@ import api
 import json
 import pytest
 import logs_db
+import chat_service
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 @pytest.fixture(autouse=True)
 def clear_rate_limit_state():
@@ -18,7 +20,7 @@ def test_conversation_persists_and_continues(tmp_path, monkeypatch):
         input_list.append({"role": "assistant", "content": "Fake response"})
         return [], [], "Fake response"
 
-    monkeypatch.setattr(api, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_service, "run_agent", fake_run_agent)
 
     with TestClient(api.app) as client:
         response = client.post("/chat", json={"message": "test"})
@@ -54,7 +56,7 @@ def test_conversation_survives_app_restart(tmp_path, monkeypatch):
         input_list.append({"role": "assistant", "content": "Fake response"})
         return [], [], "Fake response"
 
-    monkeypatch.setattr(api, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_service, "run_agent", fake_run_agent)
     with TestClient(api.app) as client:
         response = client.post("/chat", json={"message": "test"})
         body = response.json()
@@ -95,8 +97,51 @@ def test_epo_timeout_returns_504(tmp_path, monkeypatch):
     def fake_run_agent(input_list, run_id, message, token_usage):
         raise api.EPOTimeoutError("timeout")
 
-    monkeypatch.setattr(api, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_service, "run_agent", fake_run_agent)
     with TestClient(api.app) as client:
         response = client.post("/chat", json={"message": "test"})
         assert response.status_code == 504
         assert response.json()["detail"] == "EPO request timed out"
+
+def test_tool_history_survives_serialization_and_persistence(tmp_path, monkeypatch):
+    test_db = tmp_path / "test.db"
+    monkeypatch.setattr(logs_db, "DATABASE_PATH", str(test_db))
+    logs_db.init_db()
+
+    input_list = [
+        {"role": "user", "content": "Get details for EP1000000"},
+        SimpleNamespace(
+            type="function_call",
+            name="get_patent_details",
+            arguments='{"pn":"EP1000000"}',
+            call_id="call_1",
+        ),
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": '{"publication_number":"EP1000000"}',
+        },
+        SimpleNamespace(
+            type="message",
+            content=[SimpleNamespace(text="Here are the patent details.")],
+        ),
+    ]
+    serialized = chat_service.serialize_history(input_list)
+    logs_db.save_conversation(
+        "test-conversation",
+        json.dumps(serialized),
+    )
+    saved_history = logs_db.load_conversation("test-conversation")
+    assert saved_history is not None
+    restored = json.loads(saved_history)
+    assert restored[1] == {
+        "type": "function_call",
+        "name": "get_patent_details",
+        "arguments": '{"pn":"EP1000000"}',
+        "call_id": "call_1",
+    }
+    assert restored[2] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": '{"publication_number":"EP1000000"}',
+    }

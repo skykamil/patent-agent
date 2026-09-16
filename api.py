@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field, field_validator
 from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimitError
 from openai.types.responses.response_input_param import ResponseInputParam
 from contextlib import asynccontextmanager
-from logs_db import init_db, save_conversation, load_conversation, try_increment_daily_usage, log_request
-from agent import run_agent
+from logs_db import init_db, try_increment_daily_usage, log_request
 from errors import (EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError, AgentRuntimeLimitError)
+from chat_service import prepare_history, run_and_save_chat
 
 MAX_HISTORY_CHARS = 100_000
 RATE_LIMIT_REQUESTS = 10
@@ -55,22 +55,6 @@ async def internal_exception_handler(request: Request, exc: Exception):
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Internal server error"},
     )
-
-def serialize_history(input_list: ResponseInputParam):
-    serialized_history = []
-    for item in input_list:
-        if isinstance(item, dict):
-            serialized_history.append(item)
-        elif item.type == "function_call":
-            serialized_history.append({
-                "type": item.type,
-                "name": item.name,
-                "arguments": item.arguments,
-                "call_id": item.call_id
-            })
-        elif item.type == "message":
-            serialized_history.append({"role": "assistant", "content": item.content[0].text})
-    return serialized_history
 
 def get_client_ip(request: Request) -> str:
     if forwarded_for := request.headers.get("X-Forwarded-For"):
@@ -151,15 +135,11 @@ def chat(payload: ChatRequest, request: Request):
             raise
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         run_id = str(uuid.uuid4())
-        history_json = load_conversation(conversation_id)
-        if payload.conversation_id is not None and history_json is None:
+        is_new_conversation = payload.conversation_id is None
+        input_list = prepare_history(conversation_id, payload.message, is_new_conversation)
+        if input_list is None:
             error_type = "conversation_not_found"
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation ID not found")
-        if history_json is None:
-            input_list: ResponseInputParam = []
-        else:
-            input_list = json.loads(history_json)
-        input_list.append({"role": "user", "content": payload.message})
         if len(json.dumps(input_list)) > MAX_HISTORY_CHARS:
             error_type = "history_too_large"
             raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation history is too large")
@@ -168,7 +148,7 @@ def chat(payload: ChatRequest, request: Request):
             error_type = "daily_rate_limit"
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily request limit reached")
         try:
-            _, _, final_response = run_agent(input_list, run_id, payload.message, token_usage)
+            final_response = run_and_save_chat(conversation_id, input_list, run_id, payload.message, token_usage)
         except EPOTimeoutError as e:
             error_type = "epo_timeout"
             error_message = str(e)
@@ -209,9 +189,6 @@ def chat(payload: ChatRequest, request: Request):
             error_type = "openai_connection"
             error_message = str(e)
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
-        serialized_history = serialize_history(input_list)
-        history_json = json.dumps(serialized_history)
-        save_conversation(conversation_id, history_json)
         return {"answer": final_response, "conversation_id": conversation_id}
     except HTTPException as e:
         status_code = e.status_code
