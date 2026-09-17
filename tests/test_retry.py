@@ -195,3 +195,40 @@ def test_epo_request_falls_back_on_invalid_retry_after(monkeypatch):
     assert len(retry_logs) == 2
     assert 0.5 <= retry_logs[0] <= 0.75
     assert 1.0 <= retry_logs[1] <= 1.25
+
+def test_epo_request_rejects_excessive_retry_after_seconds(monkeypatch):
+    response = requests.Response()
+    response.status_code=429
+    response.headers["Retry-After"] = "120"
+    calls = []
+    waits = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append(1)
+        return response
+
+    monkeypatch.setattr(epo_client.requests, "request", fake_request)
+    monkeypatch.setattr(epo_client.epo_request_with_retry.retry, "sleep", waits.append)
+    with pytest.raises(epo_client.EPORateLimitError):
+        epo_client.epo_request_with_retry("GET", "https://example.test")
+    assert len(calls) == 1
+    assert waits == []
+
+def test_epo_request_rejects_excessive_retry_after_http_date(monkeypatch):
+    retry_time = datetime.now(timezone.utc) + timedelta(seconds=120)
+    response = requests.Response()
+    response.status_code=429
+    response.headers["Retry-After"] = format_datetime(retry_time, usegmt=True)
+    calls = []
+    waits = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append(1)
+        return response
+
+    monkeypatch.setattr(epo_client.requests, "request", fake_request)
+    monkeypatch.setattr(epo_client.epo_request_with_retry.retry, "sleep", waits.append)
+    with pytest.raises(epo_client.EPORateLimitError):
+        epo_client.epo_request_with_retry("GET", "https://example.test")
+    assert len(calls) == 1
+    assert waits == []

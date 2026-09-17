@@ -1,9 +1,29 @@
 import json
+from threading import Lock
+from contextlib import contextmanager
+from errors import ConversationBusyError
+from collections.abc import Iterable
+from openai.types.responses import ResponseInputItemParam, ResponseOutputItem
 from openai.types.responses.response_input_param import ResponseInputParam
 from logs_db import load_conversation, save_conversation
 from agent import run_agent
 
-def serialize_history(input_list: ResponseInputParam):
+active_conversations = set()
+active_conversations_locks = Lock()
+
+@contextmanager
+def conversation_guard(conversation_id: str):
+    with active_conversations_locks:
+        if conversation_id in active_conversations:
+            raise ConversationBusyError("Conversation is already being processed")
+        active_conversations.add(conversation_id)
+    try:
+        yield
+    finally:
+        with active_conversations_locks:
+            active_conversations.remove(conversation_id)
+
+def serialize_history(input_list: Iterable[ResponseInputItemParam | ResponseOutputItem]) -> list:
     serialized_history = []
     for item in input_list:
         if isinstance(item, dict):
@@ -16,7 +36,13 @@ def serialize_history(input_list: ResponseInputParam):
                 "call_id": item.call_id
             })
         elif item.type == "message":
-            serialized_history.append({"role": "assistant", "content": item.content[0].text})
+            text_parts = []
+            for part in item.content:
+                if part.type == "output_text":
+                    text_parts.append(part.text)
+                elif part.type == "refusal":
+                    text_parts.append(part.refusal)
+            serialized_history.append({"role": "assistant", "content": "\n".join(text_parts)})
     return serialized_history
 
 def load_history(conversation_id: str) -> ResponseInputParam | None:

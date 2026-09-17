@@ -4,6 +4,7 @@ import pytest
 import logs_db
 import chat_service
 from fastapi.testclient import TestClient
+from openai.types.responses import ResponseOutputMessage, ResponseOutputRefusal
 from types import SimpleNamespace
 
 @pytest.fixture(autouse=True)
@@ -123,7 +124,10 @@ def test_tool_history_survives_serialization_and_persistence(tmp_path, monkeypat
         },
         SimpleNamespace(
             type="message",
-            content=[SimpleNamespace(text="Here are the patent details.")],
+            content=[
+                SimpleNamespace(type="output_text", text="Here are the patent details."),
+                SimpleNamespace(type="output_text", text="Second part of the answer.")
+                ],
         ),
     ]
     serialized = chat_service.serialize_history(input_list)
@@ -145,3 +149,49 @@ def test_tool_history_survives_serialization_and_persistence(tmp_path, monkeypat
         "call_id": "call_1",
         "output": '{"publication_number":"EP1000000"}',
     }
+    assert restored[3]["content"] == "Here are the patent details.\nSecond part of the answer."
+
+def test_serialize_history_handles_refusal():
+    input_list = [
+        ResponseOutputMessage(
+            type="message",
+            content=[ResponseOutputRefusal(type="refusal", refusal="I cannot help with that request.")],
+            id="msg_refudal",
+            role="assistant",
+            status="completed"
+        )
+    ]
+    serialized = chat_service.serialize_history(input_list)
+    assert serialized[0]["content"] == "I cannot help with that request."
+
+def test_busy_conversation_returns_409(tmp_path, monkeypatch):
+    test_db = tmp_path / "test.db"
+    monkeypatch.setattr(logs_db, "DATABASE_PATH", str(test_db))
+    calls = []
+
+    def fake_run_agent(input_list, run_id, message, token_usage):
+        calls.append(1)
+        return [], [], "Fake response"
+
+    monkeypatch.setattr(chat_service, "run_agent", fake_run_agent)
+    conversation_id = "busy-conversation"
+    with TestClient(api.app) as client:
+        with chat_service.conversation_guard(conversation_id):
+            response = client.post("/chat", json={"message": "Get details for EP1000000", "conversation_id": conversation_id})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Conversation is already being processed"}
+    assert calls == []
+
+def test_conversation_guard_releases_after_error():
+    conversation_id = "conversation-with-error"
+    with pytest.raises(RuntimeError, match="Test error"):
+        with chat_service.conversation_guard(conversation_id):
+            raise RuntimeError("Test error")
+    with chat_service.conversation_guard(conversation_id):
+        assert conversation_id in chat_service.active_conversations
+    assert conversation_id not in chat_service.active_conversations
+
+def test_conversation_guard_allows_different_conversations():
+    with chat_service.conversation_guard("conversation-a"):
+        with chat_service.conversation_guard("conversation-b"):
+            assert {"conversation-a", "conversation-b"} <= chat_service.active_conversations

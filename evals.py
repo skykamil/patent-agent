@@ -102,6 +102,10 @@ def run_eval(agent_runner):
         actual_calls, tool_outputs, final_response = agent_runner(input_list, run_id, user_input)
         expected_response = case.get("expected_response_contains", [])
         expected_response_any = case.get("expected_response_any", [])
+        expects_search = False
+        for call in case["expected_calls"]:
+            if call["name"] == "search_patent":
+                expects_search = True
         response_pass = all(expected.lower() in final_response.lower() for expected in expected_response)
         if expected_response_any:
             response_pass = response_pass and any(expected.lower() in final_response.lower() for expected in expected_response_any)
@@ -119,7 +123,9 @@ def run_eval(agent_runner):
                         response_pass = response_pass and "2000" in normalized_response and ("limit" in normalized_response or "truncat" in normalized_response)
                 else:
                     response_pass = False
-        if expected_response or has_search_output:
+        if expects_search and not has_search_output:
+            response_pass = False
+        if expected_response or expected_response_any or expects_search:
             response_cases += 1
             if response_pass:
                 response_count += 1

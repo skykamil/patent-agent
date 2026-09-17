@@ -1,12 +1,9 @@
 import sys
 import uuid
-from dotenv import load_dotenv
 from evals import run_eval
 from logs_db import init_db
 from openai.types.responses.response_input_param import ResponseInputParam
 from agent import run_agent
-
-load_dotenv()
 
 def run_repl():
     run_id = str(uuid.uuid4())
@@ -24,7 +21,8 @@ def run_repl():
                     "role": "user",
                     "content": user_input
                     })
-            run_agent(input_list, run_id, user_input)
+            _, _, final_response = run_agent(input_list, run_id, user_input)
+            print(final_response)
 
 def main():
 

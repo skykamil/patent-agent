@@ -12,6 +12,7 @@ from logs_db import log_retry
 EPO_TIMEOUT = (3.05, 10)
 EPO_MAX_RETRIES = 2
 EPO_BACKOFF_BASE_SECONDS = 0.5
+EPO_MAX_RETRY_AFTER_SECONDS = 60.0
 epo_backoff_wait = wait_exponential(multiplier=EPO_BACKOFF_BASE_SECONDS) + wait_random(min=0, max=0.25)
 current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)
 current_tool_name: ContextVar[str | None] = ContextVar("current_tool_name", default=None)
@@ -48,6 +49,8 @@ def wait_epo_retry(retry_state: RetryCallState) -> float:
                 return fallback_wait
             try:
                 retry_after_seconds = int(retry_after)
+                if retry_after_seconds > EPO_MAX_RETRY_AFTER_SECONDS:
+                    raise EPORateLimitError("EPO retry delay exceeds the allowed limit")
                 if retry_after_seconds > 0:
                     return float(retry_after_seconds)
                 return fallback_wait
@@ -58,6 +61,8 @@ def wait_epo_retry(retry_state: RetryCallState) -> float:
                     return fallback_wait
                 now = datetime.now(timezone.utc)
                 wait_seconds = (retry_time - now).total_seconds()
+                if wait_seconds > EPO_MAX_RETRY_AFTER_SECONDS:
+                    raise EPORateLimitError("EPO retry delay exceeds the allowed limit")
                 if wait_seconds > 0:
                     return wait_seconds
                 return fallback_wait

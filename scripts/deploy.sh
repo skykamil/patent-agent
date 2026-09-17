@@ -16,9 +16,12 @@ aws ssm get-parameter \
 --query 'Parameter.Value' \
 --output text
 }
-export OPENAI_API_KEY="$(get_ssm_parameter "$OPENAI_PARAM")"
-export EPO_CONSUMER_KEY="$(get_ssm_parameter "$EPO_KEY_PARAM")"
-export EPO_CONSUMER_SECRET="$(get_ssm_parameter "$EPO_SECRET_PARAM")"
+OPENAI_API_KEY="$(get_ssm_parameter "$OPENAI_PARAM")"
+export OPENAI_API_KEY
+EPO_CONSUMER_KEY="$(get_ssm_parameter "$EPO_KEY_PARAM")"
+export EPO_CONSUMER_KEY
+EPO_CONSUMER_SECRET="$(get_ssm_parameter "$EPO_SECRET_PARAM")"
+export EPO_CONSUMER_SECRET
 cd "$(dirname "$0")/.."
 git pull --ff-only
 sudo docker build -t "$IMAGE_NAME" .

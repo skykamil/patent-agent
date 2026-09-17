@@ -18,3 +18,6 @@ class AgentInternalError(Exception):
 
 class AgentRuntimeLimitError(AgentInternalError):
     pass
+
+class ConversationBusyError(Exception):
+    pass

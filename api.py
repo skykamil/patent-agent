@@ -8,11 +8,10 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimitError
-from openai.types.responses.response_input_param import ResponseInputParam
 from contextlib import asynccontextmanager
 from logs_db import init_db, try_increment_daily_usage, log_request
-from errors import (EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError, AgentRuntimeLimitError)
-from chat_service import prepare_history, run_and_save_chat
+from errors import (EPOTimeoutError, EPOConnectionError, EPORateLimitError, EPOUpstreamError, AgentInternalError, AgentRuntimeLimitError, ConversationBusyError)
+from chat_service import prepare_history, run_and_save_chat, conversation_guard
 
 MAX_HISTORY_CHARS = 100_000
 RATE_LIMIT_REQUESTS = 10
@@ -109,6 +108,10 @@ def check_rate_limit(client_ip: str) -> None:
                 "model": ErrorResponse,
                 "description": "Conversation history is too large",
             },
+            status.HTTP_409_CONFLICT: {
+                "model": ErrorResponse,
+                "description": "Conversation is already being processed",
+            },
         },
     )
 def chat(payload: ChatRequest, request: Request):
@@ -136,60 +139,65 @@ def chat(payload: ChatRequest, request: Request):
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         run_id = str(uuid.uuid4())
         is_new_conversation = payload.conversation_id is None
-        input_list = prepare_history(conversation_id, payload.message, is_new_conversation)
-        if input_list is None:
-            error_type = "conversation_not_found"
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation ID not found")
-        if len(json.dumps(input_list)) > MAX_HISTORY_CHARS:
-            error_type = "history_too_large"
-            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation history is too large")
-        day = datetime.now(DAILY_LIMIT_TIMEZONE).date().isoformat()
-        if not try_increment_daily_usage(day, DAILY_REQUEST_LIMIT):
-            error_type = "daily_rate_limit"
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily request limit reached")
-        try:
-            final_response = run_and_save_chat(conversation_id, input_list, run_id, payload.message, token_usage)
-        except EPOTimeoutError as e:
-            error_type = "epo_timeout"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="EPO request timed out")
-        except EPOConnectionError as e:
-            error_type = "epo_connection"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="EPO service unavailable")
-        except EPORateLimitError as e:
-            error_type = "epo_rate_limit"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="EPO rate limit exceeded")
-        except EPOUpstreamError as e:
-            error_type = "epo_upstream"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="EPO returned an upstream error")
-        except AgentRuntimeLimitError as e:
-            error_type = "agent_runtime_limit"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Agent runtime limit reached")
-        except AgentInternalError as e:
-            error_type = "agent_internal"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
-        except APITimeoutError as e:
-            error_type = "openai_timeout"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="OpenAI request timed out")
-        except RateLimitError as e:
-            error_type = "openai_rate_limit"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="OpenAI rate limit exceeded")
-        except APIStatusError as e:
-            error_type = "openai_upstream"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="OpenAI returned an upstream error")
-        except APIConnectionError as e:
-            error_type = "openai_connection"
-            error_message = str(e)
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
+        with conversation_guard(conversation_id):
+            input_list = prepare_history(conversation_id, payload.message, is_new_conversation)
+            if input_list is None:
+                error_type = "conversation_not_found"
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation ID not found")
+            if len(json.dumps(input_list)) > MAX_HISTORY_CHARS:
+                error_type = "history_too_large"
+                raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation history is too large")
+            day = datetime.now(DAILY_LIMIT_TIMEZONE).date().isoformat()
+            if not try_increment_daily_usage(day, DAILY_REQUEST_LIMIT):
+                error_type = "daily_rate_limit"
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily request limit reached")
+            try:
+                final_response = run_and_save_chat(conversation_id, input_list, run_id, payload.message, token_usage)
+            except EPOTimeoutError as e:
+                error_type = "epo_timeout"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="EPO request timed out")
+            except EPOConnectionError as e:
+                error_type = "epo_connection"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="EPO service unavailable")
+            except EPORateLimitError as e:
+                error_type = "epo_rate_limit"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="EPO rate limit exceeded")
+            except EPOUpstreamError as e:
+                error_type = "epo_upstream"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="EPO returned an upstream error")
+            except AgentRuntimeLimitError as e:
+                error_type = "agent_runtime_limit"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Agent runtime limit reached")
+            except AgentInternalError as e:
+                error_type = "agent_internal"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
+            except APITimeoutError as e:
+                error_type = "openai_timeout"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="OpenAI request timed out")
+            except RateLimitError as e:
+                error_type = "openai_rate_limit"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="OpenAI rate limit exceeded")
+            except APIStatusError as e:
+                error_type = "openai_upstream"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="OpenAI returned an upstream error")
+            except APIConnectionError as e:
+                error_type = "openai_connection"
+                error_message = str(e)
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
         return {"answer": final_response, "conversation_id": conversation_id}
+    except ConversationBusyError as e:
+        error_type = "conversation_busy"
+        error_message = str(e)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Conversation is already being processed")
     except HTTPException as e:
         status_code = e.status_code
         if error_message is None:

@@ -17,9 +17,16 @@ MAX_TOOL_CALLS = 30
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=OPENAI_TIMEOUT, max_retries=2)
+_client: OpenAI | None = None
 
-def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, token_usage: dict[str, int] | None = None,):
+def get_openai_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=OPENAI_TIMEOUT, max_retries=2)
+    return _client
+
+def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, token_usage: dict[str, int] | None = None):
+    client = get_openai_client()
     if token_usage is None:
         token_usage = {
             "input": 0,
@@ -38,10 +45,9 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, toke
     if usage is not None:
         token_usage["input"] += usage.input_tokens
         token_usage["output"] += usage.output_tokens
-    print(response.output)
     for item in response.output:
         input_list.append(cast(ResponseInputItemParam, item))
-    i=0
+    i = 0
     while any(item.type == "function_call" for item in response.output) and i < MAX_AGENT_ITERATIONS:
         for item in response.output:
                 if item.type == "function_call":
@@ -179,7 +185,6 @@ def run_agent(input_list: ResponseInputParam, run_id: str, user_input: str, toke
     if any(item.type == "function_call" for item in response.output):
         raise AgentRuntimeLimitError("Agent reached maximum iteration limit")
     final_response = response.output_text
-    print(final_response)
     for log_id in logged_ids:
         update_final_response(log_id, final_response)
     if not actual_calls:    
