@@ -135,6 +135,39 @@ h1 {
     );
 }
 
+/* MARKDOWN TABLES */
+
+.markdown-table-scroll {
+    width: 100%;
+    overflow-x: auto;
+    margin: 14px 0;
+    white-space: normal;
+}
+
+.markdown-table-scroll table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+.markdown-table-scroll th,
+.markdown-table-scroll td {
+    padding: 10px 12px;
+    border: 1px solid rgba(36, 36, 36, 0.2);
+    vertical-align: top;
+    min-width: 110px;
+}
+
+.markdown-table-scroll th {
+    background: rgba(0, 2, 128, 0.07);
+    font-weight: 600;
+}
+
+.markdown-table-scroll tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.3);
+}
+
 /* AGENT WORKING */
 
 #status {

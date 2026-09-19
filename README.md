@@ -6,9 +6,17 @@ A patent research agent built on the EPO OPS API and raw OpenAI function calling
 
 ## Status
 
-**v2.0.0 — Web application and deployment milestone complete.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 completed the core CLI agent. Version 2.0 adds the browser interface, HTTP API, persistent conversations, runtime safeguards, observability, automated tests, and deployment infrastructure.
+**v2.0.1 — Agent scope, relative-date fixes, and Markdown tables.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 completed the core CLI agent. Version 2.0 added the web application and deployment infrastructure. Version 2.0.1 adds explicit patent-research instructions, current-date context, an output-token cap, incomplete-response handling, and basic Markdown table rendering.
 
 Version 2.0 includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, retry/backoff for transient upstream failures, automated retry and API/persistence tests, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
+
+### Changes in v2.0.1
+
+- Explicit patent-research instructions supplied through the Responses API `instructions` parameter on every model call, including calls after tool execution.
+- Current date calculated in `Europe/Warsaw` and supplied with the instructions on every model call. Relative expressions such as "the last year" are interpreted as the preceding 12 months.
+- A 4,000-token output cap per model call. Incomplete responses are rejected before their output is appended to conversation history or processed for tool execution; reported token usage is counted before the check.
+- Basic DOM-based Markdown table rendering, with formatted cell text, column alignment, table styling, and a horizontal overflow container.
+- The unrelated-task eval case now checks an API developer portal request. Failed final-response checks print diagnostic details.
 
 ### Core v1.0
 
@@ -30,7 +38,7 @@ Version 2.0 includes the FastAPI HTTP layer, persistent SQLite conversations, ru
 ### Productionization after v1.0
 
 - FastAPI HTTP interface with `POST /chat`, a browser frontend on `GET /`, and a dedicated `GET /health` health endpoint
-- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text, italic text, level-two and level-three headings, and ordered/unordered lists
+- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text, italic text, level-two and level-three headings, and ordered/unordered lists, and simple Markdown tables
 - Pydantic request and response models for the chat API
 - Automatic OpenAPI / Swagger UI documentation
 - FastAPI lifespan initialization for SQLite
@@ -45,7 +53,7 @@ Version 2.0 includes the FastAPI HTTP layer, persistent SQLite conversations, ru
 - EPO retry waits use exponential backoff with random jitter as a fallback and honor `Retry-After` on HTTP 429 responses in both delay-seconds and HTTP-date formats, up to 60 seconds per wait. Longer requested delays raise `EPORateLimitError` immediately, without waiting or making another attempt; the HTTP API maps this error to HTTP 429
 - OpenAI requests use a 60-second timeout and the OpenAI SDK's built-in retry behavior with `max_retries=2`
 - Retry observability is stored in SQLite with `run_id`, `tool_call_id`, tool name, service, attempt number, retry reason, and wait duration
-- Automated pytest coverage for EPO retry/backoff and excessive `Retry-After` rejection, API conversation persistence and validation, upstream timeout mapping, multipart assistant text and refusal serialization, conversation concurrency guards, and evaluation accounting when expected search output is missing. API tests use temporary SQLite databases and controlled agent replacements. Last verified on **2026-09-17**: **24 tests passed**
+- Automated pytest coverage for EPO retry/backoff and excessive `Retry-After` rejection, API conversation persistence and validation, upstream timeout mapping, multipart assistant text and refusal serialization, conversation concurrency guards, and evaluation accounting when expected search output is missing. API tests use temporary SQLite databases and controlled agent replacements. Last verified on **2026-09-19**: **24 tests passed**
 - Hard runtime limits of three agent iterations and 30 tool calls per request
 - Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
 - Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
@@ -232,7 +240,7 @@ The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is
 
 ## Evaluation
 
-The eval set contains 11 cases covering all three tools, including a two-tool chain, open-ended and bounded date ranges, pagination, and one negative case (`"What is 2 + 2?"`) where no tool should be called.
+The eval set contains 11 cases covering all three tools, including a two-tool chain, open-ended and bounded date ranges, pagination, and an unrelated API developer portal request. For the unrelated request, the harness expects no tool calls and checks that the answer contains "patent"; this is a basic scope check, not a complete verification of refusal behavior.
 
 ### Tool-call evaluation
 
@@ -248,7 +256,7 @@ If a case expects `search_patent` but no corresponding tool output is returned, 
 
 The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
 
-Last verified on **2026-09-17**:
+Last verified on **2026-09-19**:
 
 - **Tool-call eval: 11/11**
 - **Final-response eval: 11/11**
@@ -390,3 +398,7 @@ Other known limitations:
 - The per-IP limiter is a best-effort, process-local safeguard stored only in application memory. It resets when the process or container restarts, is not shared across multiple application workers or instances, and is not synchronized across concurrent requests. The global daily cap is enforced atomically in SQLite and survives restarts and container recreation as long as the persistent database volume is retained.
 - Persisted API conversation history is not trimmed, summarized, expired, or automatically cleaned up. However, before an agent run, serialized history plus the new message is capped at 100,000 characters; requests exceeding that limit are rejected with HTTP 413.
 - The conversation concurrency guard is process-local. It protects conversations within a single application process, but does not coordinate multiple workers or application instances. Run a single worker to retain this protection.
+- Patent-only behavior is instructed through prompting, not enforced by a deterministic topic filter.
+- The output-token cap applies separately to each model call and includes reasoning tokens. It is not a total per-conversation budget. Incomplete-response handling has not yet received a dedicated automated test.
+- Markdown tables require consistent column counts and do not support literal pipe characters inside cell content. Wide-table horizontal scrolling is implemented but was not verified during this patch's manual checks.
+- Final-response pagination checks currently require the phrase `page X of Y`. Correct answers that report the current page and total pages separately can fail this check.

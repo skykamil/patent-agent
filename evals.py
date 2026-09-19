@@ -65,9 +65,9 @@ EVAL_SET = [
         ]
     },
     {
-        "input": "What is 2 + 2?",
+        "input": "Design an API developer portal architecture",
         "expected_calls": [],
-        "expected_response_contains": ["4"]
+        "expected_response_contains": ["patent"]
     },
     {
         "input": "Find patents with the title wireless charging published from January 1, 2024",
@@ -129,6 +129,8 @@ def run_eval(agent_runner):
             response_cases += 1
             if response_pass:
                 response_count += 1
+            else:
+                print(n, final_response, expected_response, expected_response_any)
         print(case["input"], "→", actual_calls)
         if len(actual_calls) == len(case["expected_calls"]) and all(expected_call["name"] == actual_call["name"] and expected_call["args"].items() <= actual_call["args"].items()
             for actual_call, expected_call in zip(actual_calls, case["expected_calls"])):

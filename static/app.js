@@ -10,6 +10,12 @@ let conversationId = null;
 function renderMarkdown(text, container) {
     const lines = text.split("\n");
     let currentList = null;
+    function splitTableRow(line) {
+        let row = line.trim();
+        if (row.startsWith("|")) row = row.slice(1);
+        if (row.endsWith("|")) row = row.slice(0, -1);
+        return row.split("|").map(cell => cell.trim());
+    }
 
     function addFormattedText(element, value) {
         const parts = value.split(/(\*\*.*?\*\*|\*[^*]+?\*)/g);
@@ -29,12 +35,82 @@ function renderMarkdown(text, container) {
         }
     }
 
-    for (const line of lines) {
-        const trimmedLine = line.trim();
+    for (let i = 0; i < lines.length; i++) {
+        const trimmedLine = lines[i].trim();
 
         if (!trimmedLine) {
             currentList = null;
             continue;
+        }
+
+        const nextLine = (lines[i + 1] || "").trim();
+
+        if (trimmedLine.includes("|") && nextLine) {
+            const headers = splitTableRow(trimmedLine);
+            const separators = splitTableRow(nextLine);
+
+            const isTable = (
+                headers.length === separators.length &&
+                separators.every(cell => /^:?-{3,}:?$/.test(cell))
+            );
+
+            if (isTable) {
+                currentList = null;
+
+                const wrapper = document.createElement("div");
+                wrapper.className = "markdown-table-scroll";
+
+                const table = document.createElement("table");
+                const thead = document.createElement("thead");
+                const tbody = document.createElement("tbody");
+                const headerRow = document.createElement("tr");
+
+                const alignments = separators.map(cell => {
+                    if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+                    if (cell.endsWith(":")) return "right";
+                    return "left";
+                });
+
+                headers.forEach((value, column) => {
+                    const th = document.createElement("th");
+                    th.scope = "col";
+                    th.style.textAlign = alignments[column];
+                    addFormattedText(th, value);
+                    headerRow.appendChild(th);
+                });
+
+                thead.appendChild(headerRow);
+                table.appendChild(thead);
+                table.appendChild(tbody);
+
+                i += 1;
+
+                while (i + 1 < lines.length) {
+                    const rowLine = lines[i + 1].trim();
+
+                    if (!rowLine || !rowLine.includes("|")) break;
+
+                    const cells = splitTableRow(rowLine);
+
+                    if (cells.length !== headers.length) break;
+
+                    const tr = document.createElement("tr");
+
+                    cells.forEach((value, column) => {
+                        const td = document.createElement("td");
+                        td.style.textAlign = alignments[column];
+                        addFormattedText(td, value);
+                        tr.appendChild(td);
+                    });
+
+                    tbody.appendChild(tr);
+                    i += 1;
+                }
+
+                wrapper.appendChild(table);
+                container.appendChild(wrapper);
+                continue;
+            }
         }
 
         if (trimmedLine.startsWith("## ")) {
