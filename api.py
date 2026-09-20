@@ -195,6 +195,7 @@ def chat(payload: ChatRequest, request: Request):
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OpenAI service unavailable")
         return {"answer": final_response, "conversation_id": conversation_id}
     except ConversationBusyError as e:
+        status_code = status.HTTP_409_CONFLICT
         error_type = "conversation_busy"
         error_message = str(e)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Conversation is already being processed")

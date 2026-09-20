@@ -2,68 +2,21 @@
 
 [![Tests](https://github.com/skykamil/patent-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/skykamil/patent-agent/actions/workflows/tests.yml)
 
-A patent research agent built on the EPO OPS API and raw OpenAI function calling, without an agent framework. Three tools — two EPO OPS calls and one local computation — plus a tool-calling loop, SQLite tool-call logging, and an eval harness that checks both tool-call behavior and the agent's final response.
+A deployed patent research agent that answers natural-language questions using live data from the EPO OPS API. It uses raw OpenAI Responses API function calling, without an agent framework, and supports patent search, bibliographic lookup, multi-step tool use, and persistent conversations.
+
+**Live demo:** https://patentagent.mooo.com
+
+> This is an educational project and portfolio prototype, not a production or legal-status tool.
+
+![Patent Research Agent web interface](static/preview.png)
 
 ## Status
 
-**v2.0.1 — Agent scope, relative-date fixes, and Markdown tables.** This is a learning project and prototype, not a production or legal-status tool. Version 1.0 completed the core CLI agent. Version 2.0 added the web application and deployment infrastructure. Version 2.0.1 adds explicit patent-research instructions, current-date context, an output-token cap, incomplete-response handling, and basic Markdown table rendering.
+The project includes a FastAPI HTTP API, a browser chat interface, SQLite conversation persistence and observability, Docker deployment on AWS EC2, and HTTPS through Caddy.
 
-Version 2.0 includes the FastAPI HTTP layer, persistent SQLite conversations, runtime safeguards, request-level observability, retry/backoff for transient upstream failures, automated retry and API/persistence tests, Docker containerization, an automated EC2 deployment script, a lightweight browser chat frontend served directly by FastAPI, and public HTTPS through Caddy.
+The agent currently uses three tools: EPO patent search, EPO bibliographic lookup, and a local simplified 20-year patent-term calculation. Requests are protected by runtime limits, rate limits, persistent daily usage limits, and process-local per-conversation locking.
 
-### Changes in v2.0.1
-
-- Explicit patent-research instructions supplied through the Responses API `instructions` parameter on every model call, including calls after tool execution.
-- Current date calculated in `Europe/Warsaw` and supplied with the instructions on every model call. Relative expressions such as "the last year" are interpreted as the preceding 12 months.
-- A 4,000-token output cap per model call. Incomplete responses are rejected before their output is appended to conversation history or processed for tool execution; reported token usage is counted before the check.
-- Basic DOM-based Markdown table rendering, with formatted cell text, column alignment, table styling, and a horizontal overflow container.
-- The unrelated-task eval case now checks an API developer portal request. Failed final-response checks print diagnostic details.
-
-### Core v1.0
-
-- OAuth2 client-credentials flow against EPO OPS, with the token cached in memory and refreshed 30 seconds before expiry
-- `search_patent` — CQL query built dynamically from any combination of title, applicant, publication number, application number, and a publication date range
-- `get_patent_details` — bibliographic data for one publication, parsed from OPS XML
-- `expiration_date` — local calculation, no API call
-- Agent loop that chains tools within a turn (e.g. `get_patent_details` → `expiration_date`) without the order being prompted
-- Per-tool `try`/`except`: a failing tool returns an error object to the model as a normal `function_call_output` instead of crashing the run
-- SQLite logging of every tool call, grouped by `run_id`
-- Eval harness: 11 cases covering tool selection, pagination, date-range behavior, a two-tool chain, a no-tool case, and deterministic checks of the final response
-- Interactive REPL (`run_repl()`) as the default mode — conversation history persists across turns in a session; `N` starts a new conversation (new `run_id`, cleared history), `E` exits
-- Exception-type discrimination: network/HTTP errors (`requests.exceptions.RequestException`, surfaced via `raise_for_status()`), XML parsing errors (`ET.ParseError`), and a generic fallback are logged with distinct `status` values (`network_error`, `parse_error`, `error`)
-- Full typing of conversation history using the OpenAI SDK `ResponseInputParam` / `ResponseInputItemParam` types
-- Reusable XML helper for attribute-filtered list extraction; `get_applicants` now delegates to the generalised parser
-- Paginated `search_patent` results: 25 records per page via `X-OPS-Range`, with total result count, theoretical page count, accessible page count, and explicit truncation metadata for the OPS 2,000-record retrieval limit
-- Final-response evaluation: static checks for stable known answers plus dynamic checks against the actual `search_patent` output, including every returned publication number, pagination metadata, and the OPS retrieval-limit notice when applicable
-
-### Productionization after v1.0
-
-- FastAPI HTTP interface with `POST /chat`, a browser frontend on `GET /`, and a dedicated `GET /health` health endpoint
-- Lightweight vanilla HTML/CSS/JavaScript chat frontend served by FastAPI, with static assets under `/static`, multi-turn conversations, Enter-to-send, Shift+Enter line breaks, request locking while the agent runs, an animated working indicator, auto-scroll, and limited DOM-based Markdown rendering for bold text, italic text, level-two and level-three headings, and ordered/unordered lists, and simple Markdown tables
-- Pydantic request and response models for the chat API
-- Automatic OpenAPI / Swagger UI documentation
-- FastAPI lifespan initialization for SQLite
-- `conversation_id`-based multi-turn API conversations
-- Per-conversation concurrency guard covering history loading, agent execution, and persistence. Overlapping requests for the same conversation receive HTTP 409; different conversations can be processed concurrently
-- Persistent conversation history in SQLite, surviving application restarts
-- Responses API history serialization into a JSON-safe representation before persistence, preserving all text fragments and refusal messages within each assistant response by joining them with newlines
-- Request validation with Pydantic, including rejection of empty and whitespace-only messages
-- Explicit HTTP error mapping for conversation lookup, upstream failures, rate limits, timeouts, and internal agent errors
-- Custom EPO exception hierarchy separating timeout, connection, rate-limit, and upstream failures; malformed XML is treated as an upstream failure
-- Explicit EPO request timeouts plus retry/backoff for transient EPO failures: timeouts, connection errors, HTTP 429, and HTTP 5xx responses are retried up to three total attempts using Tenacity
-- EPO retry waits use exponential backoff with random jitter as a fallback and honor `Retry-After` on HTTP 429 responses in both delay-seconds and HTTP-date formats, up to 60 seconds per wait. Longer requested delays raise `EPORateLimitError` immediately, without waiting or making another attempt; the HTTP API maps this error to HTTP 429
-- OpenAI requests use a 60-second timeout and the OpenAI SDK's built-in retry behavior with `max_retries=2`
-- Retry observability is stored in SQLite with `run_id`, `tool_call_id`, tool name, service, attempt number, retry reason, and wait duration
-- Automated pytest coverage for EPO retry/backoff and excessive `Retry-After` rejection, API conversation persistence and validation, upstream timeout mapping, multipart assistant text and refusal serialization, conversation concurrency guards, and evaluation accounting when expected search output is missing. API tests use temporary SQLite databases and controlled agent replacements. Last verified on **2026-09-19**: **24 tests passed**
-- Hard runtime limits of three agent iterations and 30 tool calls per request
-- Request-size safeguards: 5,000-character messages, 64-character conversation IDs, and a 100,000-character pre-agent conversation-history cap
-- Per-client-IP rate limiting for `POST /chat`: 10 requests that pass request-model validation per 10-minute sliding window, tracked in memory
-- Persistent global daily request cap for `POST /chat`: up to 50 requests per day may reach agent execution; the counter is incremented atomically in SQLite immediately before agent execution and resets at midnight in `Europe/Warsaw`.
-- Request-level observability for `POST /chat` requests that reach the route: HTTP status, end-to-end latency, classified error type/message, OpenAI input/output/total token usage, and `run_id` / `conversation_id` correlation stored in SQLite
-- Hardened EPO token and XML-response validation, including malformed/missing upstream data and explicit authentication/rate-limit classification
-- Docker containerization with a slim Python image, `.dockerignore`, runtime environment variables, and SQLite persistence through a named volume
-- Automated AWS EC2 deployment via `scripts/deploy.sh`, with application secrets loaded from SSM Parameter Store, persistent SQLite storage under `/data`, and the API port published only on host `127.0.0.1:8000`
-- Public HTTPS via Caddy reverse proxy, with automatic TLS certificates from Let's Encrypt and HTTP-to-HTTPS redirects
-- Revised tool-error handling since v1.0: invalid input detected as `ValueError` returns an error object to the model, while EPO service failures and unexpected internal errors propagate to the caller and are mapped to explicit HTTP error responses by the API.
+Version history and release-specific changes are kept in [GitHub Releases](https://github.com/skykamil/patent-agent/releases).
 
 ## Tools
 
@@ -214,6 +167,10 @@ The API returns HTTP status codes for known failure modes: `404` for an unknown 
 
 `POST /chat` is additionally protected by a per-IP limit of 10 requests per 10-minute sliding window and a persistent global limit of 50 requests per day that may reach agent execution. The per-IP counter is process-local and is checked near the start of the route. The daily counter is stored in SQLite, incremented immediately before agent execution, and resets at midnight in the `Europe/Warsaw` timezone. Requests admitted to agent execution consume one daily slot even if the agent run later fails, including because of an upstream error.
 
+Transient EPO timeouts, connection errors, HTTP 429 responses, and HTTP 5xx responses are retried up to three total attempts. For HTTP 429, `Retry-After` is honored in both delay-seconds and HTTP-date formats, up to 60 seconds; longer requested waits fail immediately.
+
+OpenAI requests use a 60-second timeout and the SDK's built-in retry behavior with `max_retries=2`.
+
 ### Docker
 
 Build the image:
@@ -234,9 +191,17 @@ Run the API container with runtime credentials and persistent SQLite storage:
 docker run --rm --name patent-agent-api --env-file .env -e DATABASE_PATH=/data/logs_db.db --mount type=volume,src=patent-agent-data,dst=/data -p 127.0.0.1:8000:8000 patent-agent
 ```
 
-The API port is bound to `127.0.0.1` on the host rather than exposed directly to the Internet. Public traffic is handled by Caddy on ports 80 and 443 and reverse-proxied to FastAPI on `127.0.0.1:8000`.
+The API port is bound to `127.0.0.1` on the host rather than exposed directly to the Internet.
 
 The container stores SQLite data at `/data/logs_db.db`. The `/data` directory is backed by the `patent-agent-data` named volume, so conversation history, tool logs, request-level observability logs, retry logs, and the persistent daily-usage counter survive container removal and recreation. Without the volume, the database exists only in the container's writable layer and is lost when the container is removed.
+
+### Deployment
+
+The public demo runs on AWS EC2 in Docker. `scripts/deploy.sh` pulls the latest repository state, rebuilds the image, and recreates the `patent-agent-api` container.
+
+Application secrets are loaded at deployment time from AWS Systems Manager Parameter Store and are not stored in the repository. Production SQLite data is stored at `/data/logs_db.db`, with the host `/data` directory mounted into the container so conversations, logs, and usage counters survive container replacement.
+
+The FastAPI container is exposed only on `127.0.0.1:8000`. Caddy handles public HTTP/HTTPS traffic, automatic TLS, and reverse proxies requests to the application.
 
 ## Evaluation
 
@@ -255,6 +220,8 @@ For stable cases, the harness checks required response content. For `search_pate
 If a case expects `search_patent` but no corresponding tool output is returned, it remains included in the final-response score denominator and is counted as a failure.
 
 The expiry case additionally requires language making clear that the calculated date is simplified and not a verified legal expiration date.
+
+Automated tests last verified on **2026-09-20**: **24 passed**.
 
 Last verified on **2026-09-19**:
 
@@ -353,7 +320,7 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `api.py` | FastAPI application, request/response models, HTTP error mapping, per-IP and daily limits, request-level observability, and HTTP endpoints. |
 | `logs_db.py` | SQLite schema and persistence for tool-call logs, request logs, retry logs, conversations, final-response updates, and atomic daily-usage limiting. |
 | `tests/test_retry.py` | Pytest coverage for EPO retry/backoff behavior, `Retry-After` handling, retry observability, and fallback behavior. |
-| `tests/test_api.py` | Pytest coverage for conversation persistence and restarts, request validation, unknown conversations, EPO timeout mapping, tool-call history, multipart text and refusal serialization, HTTP 409 for busy conversations, and concurrency-guard cleanup and isolation between conversation IDs. |
+| `tests/test_api.py` | Pytest coverage for conversation persistence and restarts, request validation, unknown conversations, EPO timeout mapping, tool-call history, multipart text and refusal serialization, HTTP 409 and request-log status for busy conversations, and concurrency-guard cleanup and isolation between conversation IDs. |
 | `tests/test_evals.py` | Regression test ensuring missing expected search output counts as a failed final response and remains in the score denominator. |
 | `static/index.html` | Browser chat interface structure. |
 | `static/styles.css` | Chat layout, message styling, composer, and working indicator. |
@@ -366,7 +333,6 @@ The daily counter is updated using a single atomic SQLite UPSERT. If the current
 | `Dockerfile` | Builds the container image and starts the FastAPI application with Uvicorn. |
 | `.dockerignore` | Excludes secrets, local SQLite databases, Git metadata, caches, and development-only files from the Docker build context. |
 | `.gitignore` | Excludes `.env`, `*.db`, and `__pycache__/` from the repository. |
-| `logs_db.db` | Default local SQLite database for tool logs, request observability, retry logs, persistent conversation history, and daily usage counters; the path can be overridden with `DATABASE_PATH`. |
 
 ## Out of Scope
 

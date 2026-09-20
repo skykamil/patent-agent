@@ -181,6 +181,19 @@ def test_busy_conversation_returns_409(tmp_path, monkeypatch):
     assert response.status_code == 409
     assert response.json() == {"detail": "Conversation is already being processed"}
     assert calls == []
+    con = logs_db.get_connection()
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT status_code, error_type
+        FROM request_logs
+        WHERE conversation_id = ?
+        """,
+        (conversation_id,),
+    )
+    row = cur.fetchone()
+    con.close()
+    assert row == (409, "conversation_busy")
 
 def test_conversation_guard_releases_after_error():
     conversation_id = "conversation-with-error"
